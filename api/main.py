@@ -88,6 +88,39 @@ def x402_merchant_book(payload: dict = Body(default={}),
     return JSONResponse(status_code=status_code, content=body_out, headers=headers)
 
 
+# ---- x402: protected paid smoke (Railway-only, off by default) ----
+# Triggers ONE real $0.001 Base-Sepolia USDC transfer (buyer -> merchant) so the
+# faithful x402 settlement can be proven on-chain. Three independent gates run
+# before any USDC moves:
+#   1. ENABLE_X402_PAID_SMOKE must be "true"                -> else 404 (hidden)
+#   2. X-Orkestr-Smoke-Secret must equal X402_SMOKE_SECRET  -> else 403
+#   3. body {"confirm":"PAY_0.001_USDC"} exact              -> else 400
+# Never mutates sessions; never touches ORK-001; returns only sanitized,
+# secret-free fields (public addresses, tx hash, amount).
+@app.post("/api/x402/paid-smoke")
+def x402_paid_smoke(payload: dict = Body(default={}),
+                    x_smoke_secret: str = Header(default=None, alias="X-Orkestr-Smoke-Secret")):
+    import hmac
+
+    from payments import x402_protocol as XP
+
+    if not XP.is_paid_smoke_enabled():
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    expected = os.environ.get("X402_SMOKE_SECRET", "").strip()
+    provided = (x_smoke_secret or "").strip()
+    if not expected or not hmac.compare_digest(provided, expected):
+        raise HTTPException(status_code=403, detail="forbidden")
+
+    if not isinstance(payload, dict) or payload.get("confirm") != "PAY_0.001_USDC":
+        raise HTTPException(status_code=400,
+                            detail='confirmation required: {"confirm":"PAY_0.001_USDC"}')
+
+    result = XP.run_paid_smoke()
+    status_code = 200 if result.get("ok") else 502
+    return JSONResponse(status_code=status_code, content=result)
+
+
 # ---- Phase 1: before the meal ----
 @app.post("/api/session/start")
 def session_start(payload: dict = Body(default={})):

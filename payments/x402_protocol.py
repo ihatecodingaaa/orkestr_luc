@@ -59,6 +59,27 @@ def is_real_x402_required() -> bool:
     return _flag("REQUIRE_REAL_X402")
 
 
+def is_paid_smoke_enabled() -> bool:
+    """Gate for the protected /api/x402/paid-smoke endpoint (off by default).
+
+    Railway-only opt-in. When false the endpoint behaves as if it does not exist
+    (HTTP 404) so it can never spend USDC by accident.
+    """
+    return _flag("ENABLE_X402_PAID_SMOKE")
+
+
+def is_live_real_x402_enabled() -> bool:
+    """Gate for the NORMAL live booking flow attempting a real x402 payment.
+
+    Independent of USE_REAL_X402 (which only governs the merchant 402 challenge)
+    and ENABLE_X402_PAID_SMOKE (the protected proof endpoint). When false
+    (default), every live booking uses the ACP fallback/mock/Stripe path even
+    when USE_REAL_X402 is true — so turning the merchant 402 on never silently
+    starts spending USDC in the demo flow.
+    """
+    return _flag("ENABLE_LIVE_REAL_X402")
+
+
 def _private_key_present() -> bool:
     return bool(os.environ.get("EVM_PRIVATE_KEY", "").strip())
 
@@ -95,6 +116,8 @@ def x402_config_status() -> dict:
     return {
         "use_real_x402": is_real_x402_enabled(),
         "require_real_x402": is_real_x402_required(),
+        "enable_live_real_x402": is_live_real_x402_enabled(),
+        "enable_paid_smoke": is_paid_smoke_enabled(),
         "network": cfg["network"],
         "facilitator_url": cfg["facilitator_url"],
         "price": cfg["price"],
@@ -110,6 +133,39 @@ def x402_config_status() -> dict:
 def _merchant_config_complete() -> bool:
     cfg = get_x402_config()
     return all([cfg["pay_to"], cfg["network"], cfg["facilitator_url"], cfg["price"]])
+
+
+def _derive_buyer_address():
+    """Public buyer address derived from EVM_PRIVATE_KEY, or None.
+
+    Lazily imports eth_account so the module still imports on hosts where the
+    EVM stack is unavailable. The private key is NEVER returned, printed, or
+    logged — only the public address (safe to expose) is produced.
+    """
+    try:
+        from eth_account import Account
+        return Account.from_key(os.environ["EVM_PRIVATE_KEY"].strip()).address
+    except Exception:
+        return None
+
+
+def buyer_address_safe() -> dict:
+    """Derive the buyer's public address and assert buyer != merchant payTo.
+
+    Protects against accidentally paying yourself. Returns:
+      {"ok": bool, "buyer": <addr|None>, "merchant": <addr>, "error": <str|None>}
+    Never returns or logs the private key (only public addresses).
+    """
+    cfg = get_x402_config()
+    merchant = cfg["pay_to"]
+    buyer = _derive_buyer_address()
+    if not buyer:
+        return {"ok": False, "buyer": None, "merchant": merchant,
+                "error": "buyer_address_derivation_failed"}
+    if merchant and buyer.lower() == merchant.lower():
+        return {"ok": False, "buyer": buyer, "merchant": merchant,
+                "error": "buyer_wallet_equals_merchant_wallet"}
+    return {"ok": True, "buyer": buyer, "merchant": merchant, "error": None}
 
 
 # ---------------------------------------------------------------------------
@@ -344,6 +400,14 @@ def resolve_booking_payment(booking_ctx: dict) -> dict:
     if not is_real_x402_enabled():
         return {"action": "fallback", "mode": None, "reason": "USE_REAL_X402 not true"}
 
+    # Live-flow safety switch: even with USE_REAL_X402 on (merchant 402 live),
+    # the demo booking flow only attempts a real payment when explicitly enabled.
+    # This is a plain fallback (never a controlled_failure) — the operator chose
+    # not to spend, so REQUIRE_REAL_X402 must not turn that choice into a crash.
+    if not is_live_real_x402_enabled():
+        return {"action": "fallback", "mode": None,
+                "reason": "ENABLE_LIVE_REAL_X402 not true"}
+
     required = is_real_x402_required()
 
     # Preflight: clearly-incomplete causes (no signed payment is ever sent).
@@ -384,3 +448,131 @@ def _incomplete(required: bool, reason: str) -> dict:
     if required:
         return {"action": "controlled_failure", "mode": "x402_failed", "reason": reason}
     return {"action": "fallback", "mode": "x402_fallback", "reason": reason}
+
+
+# ---------------------------------------------------------------------------
+# Protected paid smoke — one real $0.001 USDC transfer on demand (Railway only)
+# ---------------------------------------------------------------------------
+
+BASESCAN_TX_BASE = "https://sepolia.basescan.org/tx/"
+
+
+def _fetch_unpaid_challenge() -> dict:
+    """Make an UNPAID request to the merchant endpoint and confirm a real 402.
+
+    Returns {"ok": True, "asset", "amount", "payTo"} when the response is HTTP
+    402 carrying accepts[], else {"ok": False, "error": <no-secret str>}.
+    Uses a plain (unsigned) request so no payment is ever submitted here.
+    """
+    cfg = get_x402_config()
+    url = cfg["resource_base_url"] + MERCHANT_BOOK_PATH
+    try:
+        import requests
+        resp = requests.post(url, json={"booking_ref": "X402-PAID-SMOKE-CHALLENGE"},
+                             timeout=cfg["timeout_seconds"])
+    except Exception as exc:
+        return {"ok": False, "error": f"challenge_request_failed:{exc.__class__.__name__}"}
+
+    if resp.status_code != 402:
+        return {"ok": False, "error": f"challenge_status_{resp.status_code}"}
+    try:
+        body = resp.json()
+    except Exception:
+        return {"ok": False, "error": "challenge_unparseable"}
+
+    accepts = body.get("accepts") if isinstance(body, dict) else None
+    if not isinstance(accepts, list) or not accepts or not isinstance(accepts[0], dict):
+        return {"ok": False, "error": "challenge_missing_accepts"}
+    req0 = accepts[0]
+    amount = req0.get("amount")
+    if amount is None:
+        amount = req0.get("maxAmountRequired")
+    return {"ok": True,
+            "asset": req0.get("asset"),
+            "amount": str(amount) if amount is not None else None,
+            "payTo": req0.get("payTo")}
+
+
+def run_paid_smoke() -> dict:
+    """Execute ONE real x402 paid booking and return a sanitized, secret-free result.
+
+    Intended to be reachable only behind the protected /api/x402/paid-smoke gate
+    (feature flag + secret header + explicit confirmation body). The flow:
+      1. Preflight: USE_REAL_X402 on, SDK present, merchant config + key valid.
+      2. Derive the buyer public address and HARD-FAIL if buyer == merchant payTo.
+      3. Unpaid request -> confirm HTTP 402 + accepts[] (asset/amount/payTo).
+      4. Signed retry via the official x402 sync client -> settle on Base Sepolia.
+
+    Never raises; never returns the private key or any secret. The demo is capped
+    to the configured price ($0.001 USDC) — this function only ever asks the
+    merchant for its single advertised requirement and signs that exact amount.
+    """
+    cfg = get_x402_config()
+    asset_env = os.environ.get("X402_BASE_SEPOLIA_USDC", "").strip()
+
+    # --- 1. preflight (no signed payment is ever sent on these paths) ---
+    if not is_real_x402_enabled():
+        return {"ok": False, "payment_mode": None, "error": "use_real_x402_disabled"}
+    if not _x402_importable():
+        return {"ok": False, "payment_mode": None, "error": "x402_sdk_unavailable"}
+    if not _merchant_config_complete():
+        return {"ok": False, "payment_mode": None, "error": "merchant_config_incomplete"}
+    if not _private_key_present():
+        return {"ok": False, "payment_mode": None, "error": "evm_private_key_missing"}
+    if not _private_key_valid_format():
+        return {"ok": False, "payment_mode": None, "error": "evm_private_key_invalid_format"}
+
+    # --- 2. derive buyer address + never-pay-yourself guard ---
+    guard = buyer_address_safe()
+    if not guard["ok"]:
+        return {"ok": False, "payment_mode": None, "error": guard["error"],
+                "from": guard.get("buyer"), "to": guard.get("merchant")}
+    buyer = guard["buyer"]
+    merchant = guard["merchant"]
+
+    # --- 3. confirm the unpaid challenge is a real 402 with accepts[] ---
+    challenge = _fetch_unpaid_challenge()
+    if not challenge.get("ok"):
+        return {"ok": False, "payment_mode": None, "error": challenge.get("error"),
+                "from": buyer, "to": merchant}
+    asset = challenge.get("asset") or asset_env or None
+    amount = challenge.get("amount")
+
+    # --- 4. signed retry via the official x402 sync client ---
+    paid = _do_paid_request({"booking_ref": "X402-PAID-SMOKE",
+                             "merchant": "Orkestr paid smoke"})
+    if not paid.get("ok"):
+        return {"ok": False, "payment_mode": "x402_failed",
+                "error": paid.get("reason", "payment_not_confirmed"),
+                "ambiguous": bool(paid.get("ambiguous")),
+                "network": cfg["network"], "asset": asset, "amount": amount,
+                "from": buyer, "to": merchant}
+
+    payment_response = paid.get("payment_response")
+    tx_hash = paid.get("tx_hash")
+    result = {
+        "ok": True,
+        "payment_mode": "x402_real",
+        "network": cfg["network"],
+        "asset": asset,
+        "amount": amount,
+        "from": buyer,
+        "to": merchant,
+        "txHash": tx_hash,
+        "paymentResponsePresent": payment_response is not None,
+    }
+    if tx_hash:
+        result["blockExplorerUrl"] = BASESCAN_TX_BASE + str(tx_hash)
+    if payment_response:
+        # Include only non-secret settle fields.
+        result["paymentResponse"] = {
+            "success": payment_response.get("success"),
+            "network": payment_response.get("network"),
+            "payer": payment_response.get("payer"),
+            "transaction": payment_response.get("transaction"),
+        }
+    if paid.get("parse_warning"):
+        # Payment settled (merchant returned 200) but the X-PAYMENT-RESPONSE
+        # header could not be parsed -> no tx hash to claim. Still ok=true.
+        result["parse_warning"] = paid["parse_warning"]
+    return result
