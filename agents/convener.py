@@ -621,10 +621,13 @@ def _x402_failed_booking(basics: dict, session, decision: dict) -> dict:
 def strike_booking(plan: dict, allow_x402: bool = False) -> dict:
     """Open the ACP handshake with the merchant agent and co-sign payment.
 
-    When allow_x402 is True (live, non-ORK sessions only) and USE_REAL_X402 is
-    on, the booking payment is made via a faithful x402 HTTP 402 handshake to
-    the merchant endpoint instead of the Stripe/mock delegate payment. ORK-001
-    always calls with the default allow_x402=False, so it is never affected.
+    When allow_x402 is True (live, non-ORK sessions only) AND USE_REAL_X402 is
+    on AND ENABLE_LIVE_REAL_X402 is on, the booking payment is made via a
+    faithful x402 HTTP 402 handshake to the merchant endpoint instead of the
+    Stripe/mock delegate payment. If ENABLE_LIVE_REAL_X402 is off (default),
+    resolve_booking_payment returns a plain fallback so the live flow uses the
+    ACP mock/Stripe path and never spends USDC. ORK-001 always calls with the
+    default allow_x402=False, so it is never affected.
     """
     basics = _booking_basics(plan)
     try:

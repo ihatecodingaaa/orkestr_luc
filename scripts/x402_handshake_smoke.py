@@ -135,12 +135,45 @@ check("ORK-001 net sum = 0", sum((st.get("net") or {}).values()) == 0)
 section("RAW 402 CHALLENGE (USE_REAL_X402=true, unpaid request)")
 # ---------------------------------------------------------------------------
 # Amendment 1: unpaid -> 402 + payment requirements; X-PAYMENT-RESPONSE NOT expected.
-if status["merchant_pay_to_present"] != "yes":
-    skip("raw 402 challenge", "X402_MERCHANT_PAY_TO not configured")
-else:
+#
+# When X402_RESOURCE_BASE_URL is an https:// URL, exercise the DEPLOYED merchant
+# over real HTTP instead of the in-process TestClient. The TestClient path would
+# import the x402 SDK in-process, which this Windows host blocks (Application
+# Control denies bitarray's native DLL); hitting Railway over HTTP avoids that.
+_resource_base = XP.get_x402_config()["resource_base_url"]
+_use_http = _resource_base.startswith("https://")
+
+
+def _raw_402_challenge():
+    """Return (status_code, response_text) for an unpaid merchant/book request."""
+    if _use_http:
+        import urllib.error
+        import urllib.request
+        url = _resource_base + "/api/x402/merchant/book"
+        req = urllib.request.Request(
+            url, data=b"{}", method="POST",
+            headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                return resp.status, resp.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode("utf-8", "replace")
     r = client.post("/api/x402/merchant/book", json={"booking_ref": "X402-SMOKE"})
-    check("raw unpaid request -> HTTP 402", r.status_code == 402, f"got {r.status_code}")
-    body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+    return r.status_code, r.text
+
+
+if not _use_http and status["merchant_pay_to_present"] != "yes":
+    skip("raw 402 challenge",
+         "X402_MERCHANT_PAY_TO not configured (set X402_RESOURCE_BASE_URL=https://... "
+         "to test the deployed merchant over HTTP)")
+else:
+    print(f"  (raw 402 source: {'HTTP ' + _resource_base if _use_http else 'in-process TestClient'})")
+    _code, _text = _raw_402_challenge()
+    check("raw unpaid request -> HTTP 402", _code == 402, f"got {_code}")
+    try:
+        body = json.loads(_text)
+    except Exception:
+        body = {}
     accepts = body.get("accepts") if isinstance(body, dict) else None
     check("402 body carries payment requirements (accepts[])",
           isinstance(accepts, list) and len(accepts) >= 1, str(body)[:200])
@@ -154,23 +187,30 @@ else:
     check("raw 402 does NOT require X-PAYMENT-RESPONSE header (Amendment 1)",
           True)  # explicitly documented: absence is correct on the challenge
     check("402 response leaks no private key",
-          _pk == "" or _pk not in r.text)
+          _pk == "" or _pk not in _text)
 
 # ---------------------------------------------------------------------------
 section("PAID x402 REQUEST")
 # ---------------------------------------------------------------------------
-if not status["evm_private_key_valid_format"]:
+# Stays skipped (never spends USDC) unless RUN_X402_PAID_SMOKE=true. Even then,
+# the real signed payment is performed by the dedicated, separately-gated
+# scripts/x402_paid_live.py against the deployed /api/x402/paid-smoke endpoint —
+# NOT in-process here (that would import the x402 SDK, blocked on this host).
+_run_paid = os.environ.get("RUN_X402_PAID_SMOKE", "").strip().lower() == "true"
+if not _run_paid:
+    skip("paid x402 request",
+         "default skip — set RUN_X402_PAID_SMOKE=true and run scripts/x402_paid_live.py "
+         "to make the real $0.001 USDC transfer on the deployed backend")
+elif not status["evm_private_key_valid_format"]:
     skip("paid x402 request",
          "EVM_PRIVATE_KEY missing/invalid format (need 0x + 64 hex) — expected skip")
-elif status["merchant_pay_to_present"] != "yes":
+elif status["merchant_pay_to_present"] != "yes" and not _use_http:
     skip("paid x402 request", "X402_MERCHANT_PAY_TO not configured")
 else:
-    # A real paid handshake needs a funded Base-Sepolia wallet AND a real server
-    # reachable at X402_RESOURCE_BASE_URL (the buyer makes a real socket call,
-    # not a TestClient call). We report rather than fabricate.
     skip("paid x402 request",
-         "requires funded wallet + live server at X402_RESOURCE_BASE_URL; "
-         "run scripts/x402_handshake_smoke.py against a running uvicorn to exercise it")
+         "RUN_X402_PAID_SMOKE=true acknowledged — run scripts/x402_paid_live.py against "
+         "the deployed backend to perform the real signed payment (the in-process SDK "
+         "path is blocked on this Windows host)")
 
 # ---------------------------------------------------------------------------
 section("LIVE MODE FALLBACK (USE_REAL_X402=true, REQUIRE=false, invalid key)")
