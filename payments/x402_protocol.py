@@ -23,6 +23,7 @@ Safety contract:
 Owner: Lucas (x402 plumbing).
 """
 
+import json
 import logging
 import os
 import re
@@ -296,6 +297,314 @@ def handle_merchant_payment(x_payment_header, body):
 
 
 # ---------------------------------------------------------------------------
+# Safe diagnostics — reveal WHY an x402 payment failed, never leaking secrets
+# ---------------------------------------------------------------------------
+#
+# Every string that can carry SDK/facilitator/attacker-controlled content is run
+# through _sanitize before it is returned or logged. _sanitize:
+#   * replaces any current env secret VALUE (EVM_PRIVATE_KEY, X402_SMOKE_SECRET
+#     and every *_SECRET / *_KEY / *_TOKEN / PRIVATE / ... env value) on sight,
+#   * redacts 0x + 64-or-more hex (private keys, EIP-712 signatures, hashes)
+#     while preserving public 42-char (0x + 40 hex) addresses,
+#   * redacts long base64/token runs (>= 44 chars), e.g. an encoded X-PAYMENT.
+# Full signed payloads and X-PAYMENT / PAYMENT-SIGNATURE / Authorization header
+# values are NEVER captured — only sanitized, length-capped, scalar-only views.
+
+_SECRET_NAME_RE = re.compile(
+    r"SECRET|PASSWORD|PASSWD|PRIVATE|PRIVKEY|MNEMONIC|SEED|"
+    r"API[_-]?KEY|ACCESS[_-]?KEY|AUTH|TOKEN|SIGNING|CREDENTIAL",
+    re.IGNORECASE,
+)
+_ALWAYS_SECRET_VARS = ("EVM_PRIVATE_KEY", "X402_SMOKE_SECRET")
+_HEX_SECRET_RE = re.compile(r"0x[0-9a-fA-F]{64,}")
+# A long base64/token RUN (>= 44 chars) plus optional trailing '=' padding. '='
+# is intentionally NOT allowed mid-run: otherwise a "label=<addr>" pair would be
+# glued into one long match and a public 42-char address would be redacted.
+_LONG_TOKEN_RE = re.compile(r"[A-Za-z0-9+/_-]{44,}={0,2}")
+_REDACTED = "[REDACTED]"
+_MAX_DIAG_TEXT = 2000
+
+
+def _secret_values() -> list:
+    """Current env secret values (len >= 8) to redact on sight, longest-first."""
+    vals = set()
+    for name in _ALWAYS_SECRET_VARS:
+        v = (os.environ.get(name) or "").strip()
+        if len(v) >= 8:
+            vals.add(v)
+    for name, raw in os.environ.items():
+        v = (raw or "").strip()
+        if len(v) >= 8 and _SECRET_NAME_RE.search(name):
+            vals.add(v)
+    return sorted(vals, key=len, reverse=True)
+
+
+def _sanitize(value):
+    """Redact secret material from a value's string form. Never raises."""
+    if value is None:
+        return None
+    try:
+        text = value if isinstance(value, str) else str(value)
+    except Exception:
+        return "[unstringable]"
+    for secret in _secret_values():
+        if secret and secret in text:
+            text = text.replace(secret, _REDACTED)
+    text = _HEX_SECRET_RE.sub(_REDACTED, text)
+    text = _LONG_TOKEN_RE.sub(_REDACTED, text)
+    if len(text) > _MAX_DIAG_TEXT:
+        text = text[:_MAX_DIAG_TEXT] + "...[truncated]"
+    return text
+
+
+def _safe_scalar(value):
+    """Pass scalars through, sanitize strings, reduce any object to '<type>'."""
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return _sanitize(value)
+    return f"<{type(value).__name__}>"
+
+
+def _x402_version():
+    """Installed x402 package version, or None. Never raises."""
+    try:
+        import x402
+        v = getattr(x402, "__version__", None)
+        if v:
+            return v
+    except Exception:
+        pass
+    try:
+        from importlib.metadata import version
+        return version("x402")
+    except Exception:
+        return None
+
+
+def _facilitator_error_from_text(text):
+    """Extract common error code/message fields from a JSON error body (sanitized)."""
+    try:
+        data = json.loads(text)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    out = {}
+    for key in ("error", "errorCode", "error_code", "code", "message",
+                "invalidReason", "invalid_reason", "reason", "errorReason",
+                "error_reason", "detail", "description"):
+        if data.get(key) is not None:
+            out[key] = _safe_scalar(data[key])
+    return out or None
+
+
+def _safe_response_diag(resp) -> dict:
+    """Status code, header NAMES (never values), and sanitized body of a response."""
+    out = {}
+    status = getattr(resp, "status_code", None)
+    if status is None:
+        status = getattr(resp, "status", None)
+    if status is not None:
+        out["status_code"] = status
+    try:
+        headers = getattr(resp, "headers", None)
+        if headers is not None:
+            out["header_names"] = sorted(str(k) for k in headers.keys())
+    except Exception:
+        pass
+    text = None
+    try:
+        t = getattr(resp, "text", None)
+        text = t if isinstance(t, str) else None
+    except Exception:
+        text = None
+    if text is None:
+        try:
+            raw = getattr(resp, "content", None)
+            if isinstance(raw, (bytes, bytearray)):
+                text = raw.decode("utf-8", "replace")
+        except Exception:
+            text = None
+    if isinstance(text, str):
+        out["body"] = _sanitize(text)
+        fac = _facilitator_error_from_text(text)
+        if fac:
+            out["facilitator_error"] = fac
+    return out
+
+
+def _safe_exception_diag(exc, depth: int = 0) -> dict:
+    """Sanitized, recursion-bounded projection of an exception + its cause chain.
+
+    Surfaces exactly what explains an x402 PaymentError: class name, sanitized
+    str/repr, __dict__ key names, scalar-only __dict__ values, the known x402
+    error fields (invalid_reason / error_reason / scheme / network / ...), any
+    attached HTTP response, and the underlying __cause__ — and nothing else.
+    """
+    diag = {"class": exc.__class__.__name__}
+    try:
+        diag["str"] = _sanitize(str(exc))
+    except Exception:
+        diag["str"] = "[unstringable]"
+    try:
+        diag["repr"] = _sanitize(repr(exc))
+    except Exception:
+        diag["repr"] = "[unreprable]"
+
+    d = getattr(exc, "__dict__", None)
+    if isinstance(d, dict) and d:
+        diag["dict_keys"] = sorted(str(k) for k in d.keys())
+        safe = {}
+        for k, v in d.items():
+            try:
+                safe[str(k)] = _safe_scalar(v)
+            except Exception:
+                safe[str(k)] = "[unreadable]"
+        diag["dict_values_safe"] = safe
+
+    fields = {}
+    for attr in ("invalid_reason", "invalid_message", "error_reason",
+                 "error_message", "reason", "scheme", "network", "code",
+                 "message", "transaction", "payer"):
+        try:
+            if hasattr(exc, attr):
+                val = getattr(exc, attr)
+                if val is not None and not callable(val):
+                    fields[attr] = _safe_scalar(val)
+        except Exception:
+            pass
+    if fields:
+        diag["x402_error_fields"] = fields
+
+    resp = getattr(exc, "response", None)
+    if resp is not None:
+        try:
+            diag["response"] = _safe_response_diag(resp)
+        except Exception:
+            pass
+
+    if depth < 4:
+        cause = getattr(exc, "__cause__", None) or getattr(exc, "__context__", None)
+        if cause is not None and cause is not exc:
+            diag["cause"] = _safe_exception_diag(cause, depth + 1)
+    return diag
+
+
+# --- buyer Base Sepolia balances (read-only JSON-RPC; never blocks the smoke) ---
+
+_BASE_SEPOLIA_DEFAULT_RPC = "https://sepolia.base.org"
+_BASE_SEPOLIA_USDC_DEFAULT = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+_ERC20_BALANCEOF_SELECTOR = "0x70a08231"  # keccak256("balanceOf(address)")[:4]
+
+
+def _format_units(raw: int, decimals: int) -> str:
+    """Render an integer base-unit amount as a decimal string (no float error)."""
+    sign = "-" if raw < 0 else ""
+    digits = str(abs(raw)).rjust(decimals + 1, "0")
+    whole, frac = digits[:-decimals], digits[-decimals:]
+    frac = frac.rstrip("0")
+    return f"{sign}{whole}.{frac}" if frac else f"{sign}{whole}"
+
+
+def _hex_to_int(value) -> int:
+    if not value or value == "0x":
+        return 0
+    return int(value, 16)
+
+
+def _rpc_result(rpc_url: str, method: str, params: list, timeout: float):
+    """One JSON-RPC call. Raises on transport/node error (the caller catches).
+
+    Deliberately raises plain, message-free errors so the RPC URL (which may
+    embed a provider key) can never leak through an exception string.
+    """
+    import requests
+    resp = requests.post(
+        rpc_url,
+        json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+        timeout=timeout,
+    )
+    data = resp.json()
+    if not isinstance(data, dict):
+        raise ValueError("rpc_non_object_response")
+    if data.get("error") is not None:
+        raise ValueError("rpc_node_error")
+    return data.get("result")
+
+
+def buyer_base_sepolia_balances(buyer: str) -> dict:
+    """Buyer Base Sepolia ETH + USDC balances. Never raises; never leaks the RPC URL.
+
+    Uses X402_BASE_SEPOLIA_RPC_URL when set, else https://sepolia.base.org. The
+    RPC URL (which may embed a provider key) is never returned — only whether an
+    override was used. Each balance is fetched independently; a failure is
+    reported as the exception class name so the rest still renders.
+    """
+    if not buyer:
+        return {"balance_check_error": "no_buyer_address"}
+    cfg = get_x402_config()
+    rpc_env = (os.environ.get("X402_BASE_SEPOLIA_RPC_URL") or "").strip()
+    rpc_url = rpc_env or _BASE_SEPOLIA_DEFAULT_RPC
+    usdc = ((os.environ.get("X402_BASE_SEPOLIA_USDC") or "").strip()
+            or _BASE_SEPOLIA_USDC_DEFAULT)
+    timeout = min(cfg["timeout_seconds"], 8.0)
+    out = {"rpc_source": "env" if rpc_env else "default", "usdc_contract": usdc}
+
+    try:
+        wei = _hex_to_int(
+            _rpc_result(rpc_url, "eth_getBalance", [buyer, "latest"], timeout))
+        out["eth_wei"] = str(wei)
+        out["eth"] = _format_units(wei, 18)
+    except Exception as exc:
+        out["eth_balance_error"] = exc.__class__.__name__
+
+    try:
+        calldata = (_ERC20_BALANCEOF_SELECTOR
+                    + buyer.lower().replace("0x", "").rjust(64, "0"))
+        raw = _hex_to_int(_rpc_result(
+            rpc_url, "eth_call", [{"to": usdc, "data": calldata}, "latest"], timeout))
+        out["usdc_base_units"] = str(raw)
+        out["usdc"] = _format_units(raw, 6)
+    except Exception as exc:
+        out["usdc_balance_error"] = exc.__class__.__name__
+
+    if "eth" not in out and "usdc" not in out:
+        out["balance_check_error"] = "rpc_unavailable"
+    return out
+
+
+def _failure_diagnostics(buyer, merchant, challenge, payment_diag) -> dict:
+    """Assemble the secret-free diagnostics block for a failed paid smoke."""
+    cfg = get_x402_config()
+    diag = {
+        "buyer": buyer,
+        "merchant": merchant,
+        "x402_facilitator_url": cfg["facilitator_url"],
+        "x402_network": cfg["network"],
+        "x402_booking_price": cfg["price"],
+        "x402_package_version": _x402_version(),
+        "challenge_fetched_ok": bool(isinstance(challenge, dict)
+                                     and challenge.get("ok")),
+    }
+    if isinstance(challenge, dict):
+        if challenge.get("ok"):
+            diag["challenge"] = {
+                "scheme": challenge.get("scheme"),
+                "network": challenge.get("network"),
+                "asset": challenge.get("asset"),
+                "amount": challenge.get("amount"),
+                "payTo": challenge.get("payTo"),
+            }
+        elif challenge.get("error"):
+            diag["challenge_error"] = challenge.get("error")
+    if payment_diag:
+        diag["payment_attempt"] = payment_diag
+    diag["buyer_balances"] = buyer_base_sepolia_balances(buyer)
+    return diag
+
+
+# ---------------------------------------------------------------------------
 # Buyer side — Convener pays the merchant endpoint
 # ---------------------------------------------------------------------------
 
@@ -346,7 +655,9 @@ def _do_paid_request(booking_ctx: dict) -> dict:
     except Exception as exc:
         # Before any signed payment is submitted -> clearly incomplete.
         return {"ok": False, "ambiguous": False,
-                "reason": f"buyer_init_failed:{exc.__class__.__name__}"}
+                "reason": f"buyer_init_failed:{exc.__class__.__name__}",
+                "diagnostics": {"stage": "buyer_init",
+                                "exception": _safe_exception_diag(exc)}}
 
     try:
         resp = session.post(url, json=booking_ctx, timeout=cfg["timeout_seconds"])
@@ -354,8 +665,12 @@ def _do_paid_request(booking_ctx: dict) -> dict:
         name = exc.__class__.__name__
         # A timeout may occur mid-settlement -> ambiguous (never double-charge).
         ambiguous = "Timeout" in name
+        # The x402 client wraps the real cause as PaymentError(... ) from <cause>;
+        # _safe_exception_diag walks that __cause__ chain to surface the reason.
         return {"ok": False, "ambiguous": ambiguous,
-                "reason": f"request_failed:{name}"}
+                "reason": f"request_failed:{name}",
+                "diagnostics": {"stage": "signed_request",
+                                "exception": _safe_exception_diag(exc)}}
 
     # No-double-payment rule (Amendment 2): a 200 means the merchant accepted the
     # signed payment and returned a receipt — treat as paid even if the
@@ -381,9 +696,12 @@ def _do_paid_request(booking_ctx: dict) -> dict:
                 "parse_warning": parse_warning}
 
     # 402 here means the signed retry did not result in settlement; other codes
-    # are merchant/transport errors. Either way payment was not confirmed.
+    # are merchant/transport errors. Either way payment was not confirmed. The
+    # merchant's body carries the verify/settle reason (sanitized) for diagnosis.
     return {"ok": False, "ambiguous": False,
-            "reason": f"merchant_status_{resp.status_code}"}
+            "reason": f"merchant_status_{resp.status_code}",
+            "diagnostics": {"stage": "merchant_response",
+                            "response": _safe_response_diag(resp)}}
 
 
 def resolve_booking_payment(booking_ctx: dict) -> dict:
@@ -488,6 +806,8 @@ def _fetch_unpaid_challenge() -> dict:
     if amount is None:
         amount = req0.get("maxAmountRequired")
     return {"ok": True,
+            "scheme": req0.get("scheme"),
+            "network": req0.get("network"),
             "asset": req0.get("asset"),
             "amount": str(amount) if amount is not None else None,
             "payTo": req0.get("payTo")}
@@ -534,7 +854,8 @@ def run_paid_smoke() -> dict:
     challenge = _fetch_unpaid_challenge()
     if not challenge.get("ok"):
         return {"ok": False, "payment_mode": None, "error": challenge.get("error"),
-                "from": buyer, "to": merchant}
+                "from": buyer, "to": merchant,
+                "diagnostics": _failure_diagnostics(buyer, merchant, challenge, None)}
     asset = challenge.get("asset") or asset_env or None
     amount = challenge.get("amount")
 
@@ -546,7 +867,9 @@ def run_paid_smoke() -> dict:
                 "error": paid.get("reason", "payment_not_confirmed"),
                 "ambiguous": bool(paid.get("ambiguous")),
                 "network": cfg["network"], "asset": asset, "amount": amount,
-                "from": buyer, "to": merchant}
+                "from": buyer, "to": merchant,
+                "diagnostics": _failure_diagnostics(
+                    buyer, merchant, challenge, paid.get("diagnostics"))}
 
     payment_response = paid.get("payment_response")
     tx_hash = paid.get("tx_hash")

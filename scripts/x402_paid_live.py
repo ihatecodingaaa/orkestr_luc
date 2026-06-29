@@ -40,6 +40,84 @@ def _fail(msg: str, code: int = 2):
     sys.exit(code)
 
 
+def _kv(label, value, indent="  "):
+    print(f"{indent}{label}: {value}")
+
+
+def _print_response(rsp: dict, indent: str):
+    if not isinstance(rsp, dict):
+        return
+    _kv("http status", rsp.get("status_code"), indent)
+    fac = rsp.get("facilitator_error")
+    if isinstance(fac, dict) and fac:
+        print(f"{indent}facilitator/merchant error:")
+        for k, v in fac.items():
+            _kv(k, v, indent + "  ")
+    if rsp.get("body"):
+        _kv("body (sanitized)", rsp.get("body"), indent)
+    names = rsp.get("header_names")
+    if names:
+        _kv("response header names", ", ".join(names), indent)
+
+
+def _print_exception(exc: dict, indent: str):
+    if not isinstance(exc, dict):
+        return
+    _kv("exception class", exc.get("class"), indent)
+    _kv("message (sanitized)", exc.get("str"), indent)
+    fields = exc.get("x402_error_fields")
+    if isinstance(fields, dict) and fields:
+        print(f"{indent}x402 error fields:")
+        for k, v in fields.items():
+            _kv(k, v, indent + "  ")
+    safe = exc.get("dict_values_safe")
+    if isinstance(safe, dict) and safe:
+        print(f"{indent}exception attrs (safe):")
+        for k, v in safe.items():
+            _kv(k, v, indent + "  ")
+    if exc.get("response"):
+        _print_response(exc["response"], indent)
+    cause = exc.get("cause")
+    if isinstance(cause, dict):
+        print(f"{indent}caused by ->")
+        _print_exception(cause, indent + "  ")
+
+
+def _print_diagnostics(diag: dict):
+    if not isinstance(diag, dict):
+        return
+    print("\n[x402-paid-live] ----- diagnostics (sanitized, secret-free) -----")
+    for label, key in (("buyer", "buyer"), ("merchant", "merchant"),
+                       ("facilitator", "x402_facilitator_url"),
+                       ("network", "x402_network"), ("price", "x402_booking_price"),
+                       ("x402 version", "x402_package_version"),
+                       ("challenge fetched ok", "challenge_fetched_ok")):
+        if key in diag:
+            _kv(label, diag.get(key))
+    if diag.get("challenge_error"):
+        _kv("challenge error", diag.get("challenge_error"))
+    ch = diag.get("challenge")
+    if isinstance(ch, dict):
+        print("  challenge accepts[0]:")
+        for k in ("scheme", "network", "asset", "amount", "payTo"):
+            _kv(k, ch.get(k), "    ")
+    bal = diag.get("buyer_balances")
+    if isinstance(bal, dict):
+        print("  buyer Base Sepolia balances:")
+        for k in ("rpc_source", "eth", "eth_wei", "usdc", "usdc_base_units",
+                  "usdc_contract", "eth_balance_error", "usdc_balance_error",
+                  "balance_check_error"):
+            if k in bal:
+                _kv(k, bal.get(k), "    ")
+    pa = diag.get("payment_attempt")
+    if isinstance(pa, dict):
+        print(f"  payment attempt stage: {pa.get('stage')}")
+        if pa.get("exception"):
+            _print_exception(pa["exception"], "    ")
+        if pa.get("response"):
+            _print_response(pa["response"], "    ")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Trigger the protected x402 paid smoke.")
     parser.add_argument("--confirm", default="",
@@ -86,6 +164,10 @@ def main():
     # The server response is already sanitized (no secrets). Print it as-is.
     print(f"[x402-paid-live] HTTP {status}")
     print(json.dumps(data, indent=2))
+
+    # On failure the server attaches a sanitized diagnostics block explaining
+    # WHY the payment did not settle — render it in a readable form.
+    _print_diagnostics(data.get("diagnostics"))
 
     tx = data.get("txHash")
     if tx:
