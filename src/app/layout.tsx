@@ -2,8 +2,9 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Split — Payment splitting between friends",
-  description: "Mock payment splitting app built with the Orkestr design system",
+  title: "Orkestr — Plan dinner without the group chat chaos",
+  description:
+    "Friends set their constraints, Orkestr's AI agents find the compromise, book it, and prove payment with x402 USDC on Base.",
 };
 
 export const viewport: Viewport = {

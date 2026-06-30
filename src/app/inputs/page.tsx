@@ -10,7 +10,6 @@ import {
 } from "@/components/layout";
 import { Button } from "@/components/orkestr/Button";
 import { Input } from "@/components/orkestr/Input";
-import { Card } from "@/components/orkestr/Card";
 
 export default function InputsPage() {
   return (
