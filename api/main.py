@@ -81,10 +81,15 @@ def venues():
 # ORK-001. Only this single route is payment-gated; CORS/other routes untouched.
 @app.post("/api/x402/merchant/book")
 def x402_merchant_book(payload: dict = Body(default={}),
+                       payment_signature: str = Header(default=None, alias="PAYMENT-SIGNATURE"),
                        x_payment: str = Header(default=None, alias="X-PAYMENT")):
     from payments import x402_protocol as XP
 
-    status_code, body_out, headers = XP.handle_merchant_payment(x_payment, payload)
+    # The official x402 client retries a signed V2 payment in the PAYMENT-SIGNATURE
+    # header (V1 used X-PAYMENT). Read V2 first, fall back to the legacy V1 header
+    # so both client versions settle. decode_payment_signature_header handles both.
+    payment_header = payment_signature or x_payment
+    status_code, body_out, headers = XP.handle_merchant_payment(payment_header, payload)
     return JSONResponse(status_code=status_code, content=body_out, headers=headers)
 
 
