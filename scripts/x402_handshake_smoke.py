@@ -145,7 +145,12 @@ _use_http = _resource_base.startswith("https://")
 
 
 def _raw_402_challenge():
-    """Return (status_code, response_text) for an unpaid merchant/book request."""
+    """Return (status_code, response_text, headers) for an unpaid merchant/book request.
+
+    headers is a case-insensitive mapping supporting .get() (urllib HTTPMessage
+    or the TestClient response headers), so the PAYMENT-REQUIRED V2 header can be
+    asserted regardless of transport.
+    """
     if _use_http:
         import urllib.error
         import urllib.request
@@ -155,11 +160,11 @@ def _raw_402_challenge():
             headers={"Content-Type": "application/json"})
         try:
             with urllib.request.urlopen(req, timeout=20) as resp:
-                return resp.status, resp.read().decode("utf-8", "replace")
+                return resp.status, resp.read().decode("utf-8", "replace"), resp.headers
         except urllib.error.HTTPError as e:
-            return e.code, e.read().decode("utf-8", "replace")
+            return e.code, e.read().decode("utf-8", "replace"), e.headers
     r = client.post("/api/x402/merchant/book", json={"booking_ref": "X402-SMOKE"})
-    return r.status_code, r.text
+    return r.status_code, r.text, r.headers
 
 
 if not _use_http and status["merchant_pay_to_present"] != "yes":
@@ -168,7 +173,7 @@ if not _use_http and status["merchant_pay_to_present"] != "yes":
          "to test the deployed merchant over HTTP)")
 else:
     print(f"  (raw 402 source: {'HTTP ' + _resource_base if _use_http else 'in-process TestClient'})")
-    _code, _text = _raw_402_challenge()
+    _code, _text, _headers = _raw_402_challenge()
     check("raw unpaid request -> HTTP 402", _code == 402, f"got {_code}")
     try:
         body = json.loads(_text)
@@ -184,6 +189,13 @@ else:
               req0.get("network") == "eip155:84532", str(req0.get("network")))
         check("requirement has payTo + amount",
               bool(req0.get("payTo")) and bool(req0.get("amount")), str(req0))
+    # V2 spec: resource must be non-null (was the reported defect: resource:null).
+    _resource = body.get("resource") if isinstance(body, dict) else None
+    check("402 body has non-null resource (V2)", bool(_resource), str(_resource))
+    # V2 client requirement: the SDK parses the PAYMENT-REQUIRED header; without it
+    # x402_requests raises ValueError("Invalid payment required response").
+    check("402 carries PAYMENT-REQUIRED header (V2 client requirement)",
+          bool(_headers.get("PAYMENT-REQUIRED")), "PAYMENT-REQUIRED header missing")
     check("raw 402 does NOT require X-PAYMENT-RESPONSE header (Amendment 1)",
           True)  # explicitly documented: absence is correct on the challenge
     check("402 response leaks no private key",

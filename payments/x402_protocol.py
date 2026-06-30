@@ -210,6 +210,22 @@ def _merchant_requirements(server):
     return server.build_payment_requirements(config)
 
 
+def _merchant_resource_info():
+    """The canonical paid-resource descriptor for the 402 challenge.
+
+    A spec-complete x402 PaymentRequired carries a non-null `resource` (the
+    official client uses resource.url as the paywall/return URL). We advertise
+    the exact paid resource URL: {resource_base_url}/api/x402/merchant/book.
+    """
+    from x402 import ResourceInfo
+    cfg = get_x402_config()
+    return ResourceInfo(
+        url=cfg["resource_base_url"] + MERCHANT_BOOK_PATH,
+        description="Orkestr x402 venue booking",
+        mime_type="application/json",
+    )
+
+
 def _booking_receipt(body: dict) -> dict:
     cfg = get_x402_config()
     body = body or {}
@@ -247,18 +263,29 @@ def handle_merchant_payment(x_payment_header, body):
         LOGGER.warning("x402 merchant setup failed: %s", exc.__class__.__name__)
         return 503, {"ok": False, "error": "x402_setup_failed"}, {}
 
-    from x402.http import (X_PAYMENT_RESPONSE_HEADER, decode_payment_signature_header,
-                           encode_payment_response_header)
+    from x402.http import (PAYMENT_REQUIRED_HEADER, PAYMENT_RESPONSE_HEADER,
+                           X_PAYMENT_RESPONSE_HEADER, decode_payment_signature_header,
+                           encode_payment_required_header, encode_payment_response_header)
 
     # --- unpaid: issue the 402 challenge ---
+    # The official x402 client (2.14.0) accepts a 402 ONLY via the V2
+    # PAYMENT-REQUIRED header or a V1 (x402Version==1) body; a bare V2 JSON body
+    # is rejected with ValueError("Invalid payment required response"). We speak
+    # V2, so we MUST emit the PAYMENT-REQUIRED header (base64 of the
+    # PaymentRequired). The JSON body is kept for the raw-curl proof and human
+    # readability — but the header is what makes the SDK client proceed to sign.
     if not x_payment_header:
         try:
-            pr = server.create_payment_required_response(requirements)
+            pr = server.create_payment_required_response(
+                requirements, resource=_merchant_resource_info(),
+                error="Payment required")
             body_out = pr.model_dump(mode="json")
+            challenge_headers = {
+                PAYMENT_REQUIRED_HEADER: encode_payment_required_header(pr)}
         except Exception as exc:
             LOGGER.warning("x402 build 402 failed: %s", exc.__class__.__name__)
             return 503, {"ok": False, "error": "x402_challenge_failed"}, {}
-        return 402, body_out, {}
+        return 402, body_out, challenge_headers
 
     # --- paid attempt: verify then settle via the facilitator ---
     try:
@@ -290,7 +317,10 @@ def handle_merchant_payment(x_payment_header, body):
     receipt = _booking_receipt(body)
     headers = {}
     try:
-        headers[X_PAYMENT_RESPONSE_HEADER] = encode_payment_response_header(settle)
+        encoded = encode_payment_response_header(settle)
+        # V2 clients read PAYMENT-RESPONSE; keep X-PAYMENT-RESPONSE for V1 back-compat.
+        headers[PAYMENT_RESPONSE_HEADER] = encoded
+        headers[X_PAYMENT_RESPONSE_HEADER] = encoded
     except Exception as exc:  # settlement succeeded; header is best-effort
         LOGGER.warning("x402 encode response header failed: %s", exc.__class__.__name__)
     return 200, receipt, headers
@@ -595,6 +625,9 @@ def _failure_diagnostics(buyer, merchant, challenge, payment_diag) -> dict:
                 "asset": challenge.get("asset"),
                 "amount": challenge.get("amount"),
                 "payTo": challenge.get("payTo"),
+                "resource": challenge.get("resource"),
+                "payment_required_header_present":
+                    challenge.get("payment_required_header_present"),
             }
         elif challenge.get("error"):
             diag["challenge_error"] = challenge.get("error")
@@ -680,8 +713,9 @@ def _do_paid_request(booking_ctx: dict) -> dict:
             receipt = resp.json()
         except Exception:
             receipt = None
-        from x402.http import X_PAYMENT_RESPONSE_HEADER
-        hdr = resp.headers.get(X_PAYMENT_RESPONSE_HEADER)
+        from x402.http import PAYMENT_RESPONSE_HEADER, X_PAYMENT_RESPONSE_HEADER
+        hdr = (resp.headers.get(PAYMENT_RESPONSE_HEADER)
+               or resp.headers.get(X_PAYMENT_RESPONSE_HEADER))
         payment_response = parse_payment_response_header(hdr)
         tx_hash = None
         parse_warning = None
@@ -805,12 +839,19 @@ def _fetch_unpaid_challenge() -> dict:
     amount = req0.get("amount")
     if amount is None:
         amount = req0.get("maxAmountRequired")
+    # resource is a serialized ResourceInfo object ({"url": ...}); surface its url.
+    res = body.get("resource")
+    resource_url = res.get("url") if isinstance(res, dict) else res
+    # The V2 client requires the PAYMENT-REQUIRED header; report its presence
+    # (requests' headers are case-insensitive). Plain HTTP probe — no x402 import.
     return {"ok": True,
             "scheme": req0.get("scheme"),
             "network": req0.get("network"),
             "asset": req0.get("asset"),
             "amount": str(amount) if amount is not None else None,
-            "payTo": req0.get("payTo")}
+            "payTo": req0.get("payTo"),
+            "resource": resource_url,
+            "payment_required_header_present": bool(resp.headers.get("PAYMENT-REQUIRED"))}
 
 
 def run_paid_smoke() -> dict:

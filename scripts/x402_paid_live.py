@@ -99,7 +99,8 @@ def _print_diagnostics(diag: dict):
     ch = diag.get("challenge")
     if isinstance(ch, dict):
         print("  challenge accepts[0]:")
-        for k in ("scheme", "network", "asset", "amount", "payTo"):
+        for k in ("scheme", "network", "asset", "amount", "payTo", "resource",
+                  "payment_required_header_present"):
             _kv(k, ch.get(k), "    ")
     bal = diag.get("buyer_balances")
     if isinstance(bal, dict):
