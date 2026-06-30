@@ -185,6 +185,65 @@ def status(sid: str):
     return {"phase": s["phase"]}
 
 
+@app.get("/api/session/{sid}/public")
+def session_public(sid: str):
+    """Read-only public snapshot of a room — safe for any device to poll.
+
+    Powers cross-device sync for the presenter command center and the mobile
+    participant views (who has joined / submitted, readiness, phase). This NEVER
+    runs the planning/booking pipeline (no compute_plan), so polling it can never
+    trigger a real x402 payment. Exposes only public demo state: member ids,
+    display names, avatars, each member's own stated demo preferences, readiness,
+    phase, and a public payment_mode *label* if a plan already exists. No private
+    keys, no vault tokens, no secrets of any kind are returned.
+    """
+    s = _require_session(sid)
+    ready = list(s.get("ready", []))
+    members_out = []
+    for m in s.get("members", []):
+        c = m.get("constraints") or {}
+        submitted = bool(c)
+        mid = m.get("id")
+        members_out.append({
+            "id": mid,
+            "name": m.get("name"),
+            "avatar": m.get("avatar"),
+            "submitted": submitted,
+            "ready": mid in ready,
+            # The member's own constraints are demo preferences they entered — not
+            # secrets. Summarised to the public-facing fields only.
+            "constraints": {
+                "available_days": c.get("available_days", []),
+                "budget_max": c.get("budget_max"),
+                "dietary": c.get("dietary", []),
+            } if submitted else None,
+            "freeform": (m.get("freeform") or "") if submitted else "",
+        })
+
+    plan = s.get("plan") if isinstance(s.get("plan"), dict) else None
+    handshake = s.get("handshake") if isinstance(s.get("handshake"), dict) else {}
+    mandate = (handshake.get("mandate") or {}) if isinstance(handshake, dict) else {}
+    # Public payment_mode label only (e.g. "mock" / "x402" / "x402_real").
+    # Never the vault token / order / signature material.
+    payment_mode = mandate.get("payment_mode") if isinstance(mandate, dict) else None
+
+    return {
+        "session_id": s.get("session_id"),
+        "name": s.get("name"),
+        "live": bool(s.get("live")),
+        "phase": s.get("phase"),
+        "members": members_out,
+        "ready": ready,
+        "ready_count": sum(1 for m in members_out if m["ready"]),
+        "submitted_count": sum(1 for m in members_out if m["submitted"]),
+        "members_total": len(members_out),
+        "plan_ready": bool(plan),
+        "booking_ref": plan.get("booking_ref") if plan else None,
+        "payment_mode": payment_mode,
+        "booking_failed": bool(s.get("booking_failed")),
+    }
+
+
 @app.get("/api/plan/{sid}")
 def plan(sid: str):
     s = _require_session(sid)
