@@ -154,9 +154,17 @@ def compute_plan(sid):
 
     s["booking_failed"] = False
     s["fail_reason"] = None
-    # allow_x402 only for live sessions; ORK-001's seed_demo keeps the default
-    # allow_x402=False, so the frozen demo never attempts a real x402 payment.
-    booking = strike_booking(s["plan"], allow_x402=bool(s.get("live")))
+    # HARD LIVE-FLOW SAFETY GATE (defense-in-depth, computed as early as possible).
+    # A real x402 USDC payment is attempted ONLY when this is a live session AND
+    # ENABLE_LIVE_REAL_X402 is exactly "true". This short-circuits before
+    # strike_booking/resolve_booking_payment, so the normal live flow can never
+    # spend USDC unless explicitly enabled — even if USE_REAL_X402=true or
+    # REQUIRE_REAL_X402=true. ORK-001 (seed_demo) calls strike_booking with the
+    # default allow_x402=False and is never affected; for ORK-001 the left side is
+    # already False so the env gate is not even consulted.
+    from payments.x402_protocol import is_live_real_x402_enabled
+    allow_x402 = bool(s.get("live")) and is_live_real_x402_enabled()
+    booking = strike_booking(s["plan"], allow_x402=allow_x402)
     s["handshake"] = {
         "request": booking["request"],
         "response": booking["response"],

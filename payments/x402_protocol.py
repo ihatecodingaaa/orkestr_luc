@@ -72,13 +72,22 @@ def is_paid_smoke_enabled() -> bool:
 def is_live_real_x402_enabled() -> bool:
     """Gate for the NORMAL live booking flow attempting a real x402 payment.
 
+    AIRTIGHT: this returns True ONLY when ENABLE_LIVE_REAL_X402 is EXACTLY the
+    string "true" (trimmed, case-sensitive). Every other value — missing,
+    "false", "False", "FALSE", "0", "1", "yes", "TRUE", "True", empty, or
+    anything else — keeps the live flow on the ACP fallback/mock/Stripe path so
+    it can NEVER spend USDC by accident. This is intentionally stricter than the
+    permissive _flag() used for the other switches: the live spend gate must not
+    be opened by a near-miss value.
+
     Independent of USE_REAL_X402 (which only governs the merchant 402 challenge)
-    and ENABLE_X402_PAID_SMOKE (the protected proof endpoint). When false
-    (default), every live booking uses the ACP fallback/mock/Stripe path even
-    when USE_REAL_X402 is true — so turning the merchant 402 on never silently
-    starts spending USDC in the demo flow.
+    and ENABLE_X402_PAID_SMOKE (the protected proof endpoint). When this is not
+    exactly "true", every live booking uses the fallback path even when
+    USE_REAL_X402 is true — so turning the merchant 402 on never silently starts
+    spending USDC in the demo flow, and even REQUIRE_REAL_X402=true cannot force
+    a charge (resolve_booking_payment short-circuits to a plain fallback first).
     """
-    return _flag("ENABLE_LIVE_REAL_X402")
+    return os.environ.get("ENABLE_LIVE_REAL_X402", "").strip() == "true"
 
 
 def _private_key_present() -> bool:
