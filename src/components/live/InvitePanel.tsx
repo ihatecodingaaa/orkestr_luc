@@ -1,10 +1,22 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useSyncExternalStore } from "react";
 import { Avatar, CopyButton, StatusPill } from "./primitives";
 import { participantLink, personaById, qrImageUrl } from "@/lib/demo";
 import type { Member } from "@/lib/orkestr-api";
 import s from "./live.module.css";
+
+// Origin is only known on the client. The server snapshot is empty so SSR and
+// the first hydration render agree; after hydration the client snapshot fills
+// it in — keeps invite links absolute (scannable / shareable) with no mismatch.
+const subscribeNoop = () => () => {};
+function useOrigin(): string {
+  return useSyncExternalStore(
+    subscribeNoop,
+    () => window.location.origin,
+    () => "",
+  );
+}
 
 // Deterministic faux-QR pattern so the card still looks like a QR code offline
 // (the real, scannable QR is an <img>; this renders only if that image fails).
@@ -24,11 +36,11 @@ function fauxCells(seed: string, n = 11): boolean[] {
   return out;
 }
 
-function QrTile({ link, seed }: { link: string; seed: string }) {
+function QrTile({ link, seed, ready }: { link: string; seed: string; ready: boolean }) {
   const [ok, setOk] = useState(true);
   return (
     <div className={s.qrTile} aria-hidden>
-      {ok ? (
+      {ok && ready ? (
         // eslint-disable-next-line @next/next/no-img-element
         <img
           className={s.qrImg}
@@ -54,13 +66,15 @@ function InviteCard({
   member,
   roomId,
   ready,
+  origin,
 }: {
   member: Member;
   roomId: string;
   ready: boolean;
+  origin: string;
 }) {
   const persona = personaById(member.id);
-  const link = participantLink(roomId, member.id);
+  const link = participantLink(roomId, member.id, origin);
 
   return (
     <div className={`${s.inviteCard} ${ready ? s.inviteCardReady : ""}`}>
@@ -73,7 +87,7 @@ function InviteCard({
         <StatusPill kind={ready ? "ready" : "pending"}>{ready ? "Ready" : "Pending"}</StatusPill>
       </div>
 
-      <QrTile link={link} seed={`${roomId}:${member.id}`} />
+      <QrTile link={link} seed={`${roomId}:${member.id}`} ready={Boolean(origin)} />
       <span className={s.qrCaption}>Scan to join as {member.name}</span>
 
       <div className={s.inviteActions}>
@@ -97,6 +111,7 @@ export function InvitePanel({
   readyIds: string[];
   localRoom?: boolean;
 }) {
+  const origin = useOrigin();
   // Only reached in the brief window before a room id exists. Never a dead-end:
   // the room is created automatically, so this reads as setup, not an error.
   if (!roomId) {
@@ -136,7 +151,13 @@ export function InvitePanel({
 
       <div className={s.inviteGrid}>
         {members.map((m) => (
-          <InviteCard key={m.id} member={m} roomId={roomId} ready={readyIds.includes(m.id)} />
+          <InviteCard
+            key={m.id}
+            member={m}
+            roomId={roomId}
+            origin={origin}
+            ready={readyIds.includes(m.id)}
+          />
         ))}
       </div>
     </div>

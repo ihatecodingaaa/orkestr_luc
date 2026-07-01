@@ -44,7 +44,7 @@ function LiveApp() {
 
 export default function Home() {
   return (
-    <main className={`midnight ${s.app}`}>
+    <main className={`garden ${s.app}`}>
       <div className={s.appInner}>
         <Suspense
           fallback={

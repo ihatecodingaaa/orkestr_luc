@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap');
 
 :root {
   /* Brand & Accent */
@@ -852,91 +852,107 @@ button.tag-positive:hover {
 }
 
 /* ==========================================================================
-   Midnight Social Commerce — scoped theme for the live Orkestr app ONLY.
-   Tokens + base styles live under .midnight so the existing light
-   Splitwise/gallery pages are never affected. Apply `className="midnight"`
+   Garden Table — warm green + cream theme for the live Orkestr app ONLY.
+   Tokens + base styles live under .garden so the existing light
+   Splitwise/gallery pages are never affected. Apply `className="garden"`
    on the live app root; CSS custom properties cascade to every descendant
    regardless of which CSS-module the descendant's class comes from.
+   The token *names* are unchanged from the old dark theme, so every
+   var(--bg)/var(--panel)/var(--primary) in live.module.css re-themes at once.
    ========================================================================== */
-.midnight {
-  --bg: #070A12;
-  --bg-soft: #0B1020;
-  --panel: rgba(15, 23, 42, 0.72);
-  --panel-strong: #0F172A;
-  --border: rgba(148, 163, 184, 0.18);
-  --border-bright: rgba(148, 163, 184, 0.32);
-  --text: #F8FAFC;
-  --muted: #94A3B8;
-  --muted-2: #64748B;
-  --primary: #8B5CF6;
-  --primary-2: #06B6D4;
-  --success: #22C55E;
-  --money: #10B981;
-  --warning: #F59E0B;
-  --danger: #EF4444;
+.garden {
+  /* Surfaces — warm cream page, near-white cards, beige insets */
+  --bg: #FBF5DD;
+  --bg-soft: #F2E9C4;
+  --panel: rgba(255, 252, 241, 0.92);
+  --panel-strong: #ECE3B4;
 
-  --friend-a: #F97316;
-  --friend-b: #22C55E;
-  --friend-c: #06B6D4;
-  --friend-d: #A855F7;
-  --friend-e: #F43F5E;
+  /* Hairlines — soft deep-green so cards read on cream */
+  --border: rgba(13, 83, 14, 0.16);
+  --border-bright: rgba(13, 83, 14, 0.30);
 
-  --font-head: 'Space Grotesk', 'Plus Jakarta Sans', system-ui, sans-serif;
+  /* Ink — deep green-black, high contrast on cream */
+  --text: #172313;
+  --muted: #4F5C46;
+  --muted-2: #5C6952;
+
+  /* Brand greens */
+  --primary: #306D29;
+  --primary-2: #0D530E;
+  --primary-soft: #DCEACB;
+
+  /* Semantic */
+  --success: #306D29;
+  --money: #0D530E;
+  --warning: #B7791F;
+  --danger: #B42318;
+  --receipt: #FFF8D8;
+
+  /* Friend accents — warm, distinct, and readable as initials on cream */
+  --friend-a: #C04A2B;
+  --friend-b: #3E7D33;
+  --friend-c: #9C6F16;
+  --friend-d: #7A5CB0;
+  --friend-e: #227065;
+
+  /* Type — rounded, friendly, premium (no cyber display face) */
+  --font-head: 'Plus Jakarta Sans', system-ui, sans-serif;
   --font-ui: 'Inter', system-ui, sans-serif;
 
+  /* Shape & elevation — soft, green-tinted */
   --ork-radius: 18px;
   --ork-radius-sm: 12px;
   --ork-radius-lg: 26px;
-  --ork-shadow: 0 24px 60px -24px rgba(2, 6, 23, 0.85);
-  --ork-glow-primary: 0 0 0 1px rgba(139, 92, 246, 0.35), 0 18px 50px -20px rgba(139, 92, 246, 0.55);
+  --ork-shadow: 0 22px 50px -30px rgba(13, 83, 14, 0.30);
+  --ork-glow-primary: 0 0 0 1px rgba(48, 109, 41, 0.22), 0 20px 46px -24px rgba(48, 109, 41, 0.30);
 
   position: relative;
   min-height: 100vh;
   color: var(--text);
   font-family: var(--font-ui);
   background:
-    radial-gradient(1200px 720px at 12% -8%, rgba(139, 92, 246, 0.20), transparent 60%),
-    radial-gradient(1000px 620px at 100% 0%, rgba(6, 182, 212, 0.16), transparent 55%),
-    radial-gradient(900px 700px at 50% 120%, rgba(16, 185, 129, 0.10), transparent 60%),
+    radial-gradient(1100px 680px at 10% -8%, rgba(48, 109, 41, 0.12), transparent 60%),
+    radial-gradient(960px 600px at 100% 0%, rgba(13, 83, 14, 0.10), transparent 55%),
+    radial-gradient(900px 720px at 50% 118%, rgba(231, 225, 177, 0.55), transparent 62%),
     var(--bg);
   -webkit-font-smoothing: antialiased;
 }
 
-.midnight ::selection {
-  background: rgba(139, 92, 246, 0.40);
-  color: #fff;
+.garden ::selection {
+  background: rgba(48, 109, 41, 0.24);
+  color: var(--text);
 }
 
-.midnight :focus-visible {
-  outline: 2px solid var(--primary-2);
+.garden :focus-visible {
+  outline: 2px solid var(--primary);
   outline-offset: 2px;
   border-radius: 10px;
 }
 
-/* Dark, thin scrollbars everywhere in the live app — never a bright native bar
-   against the midnight UI (Firefox + WebKit/Chromium). */
-.midnight,
-.midnight * {
+/* Soft deep-green scrollbars — visible on cream, never a harsh native bar
+   (Firefox + WebKit/Chromium). */
+.garden,
+.garden * {
   scrollbar-width: thin;
-  scrollbar-color: rgba(148, 163, 184, 0.32) transparent;
+  scrollbar-color: rgba(13, 83, 14, 0.32) transparent;
 }
-.midnight ::-webkit-scrollbar,
-.midnight::-webkit-scrollbar {
+.garden ::-webkit-scrollbar,
+.garden::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
-.midnight ::-webkit-scrollbar-track,
-.midnight::-webkit-scrollbar-track {
+.garden ::-webkit-scrollbar-track,
+.garden::-webkit-scrollbar-track {
   background: transparent;
 }
-.midnight ::-webkit-scrollbar-thumb,
-.midnight::-webkit-scrollbar-thumb {
-  background: rgba(148, 163, 184, 0.32);
+.garden ::-webkit-scrollbar-thumb,
+.garden::-webkit-scrollbar-thumb {
+  background: rgba(13, 83, 14, 0.30);
   border-radius: 999px;
 }
-.midnight ::-webkit-scrollbar-thumb:hover,
-.midnight::-webkit-scrollbar-thumb:hover {
-  background: rgba(148, 163, 184, 0.5);
+.garden ::-webkit-scrollbar-thumb:hover,
+.garden::-webkit-scrollbar-thumb:hover {
+  background: rgba(13, 83, 14, 0.5);
 }
 
 /* Shared animations for the live app (ork- prefix avoids gallery collisions). */
@@ -952,8 +968,8 @@ button.tag-positive:hover {
   to { opacity: 1; transform: translateY(0); }
 }
 @keyframes ork-ring-pulse {
-  0% { box-shadow: 0 0 0 0 rgba(139, 92, 246, 0.45); }
-  100% { box-shadow: 0 0 0 14px rgba(139, 92, 246, 0); }
+  0% { box-shadow: 0 0 0 0 rgba(48, 109, 41, 0.45); }
+  100% { box-shadow: 0 0 0 14px rgba(48, 109, 41, 0); }
 }
 @keyframes ork-shimmer {
   0% { background-position: -480px 0; }
@@ -965,9 +981,9 @@ button.tag-positive:hover {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .midnight *,
-  .midnight *::before,
-  .midnight *::after {
+  .garden *,
+  .garden *::before,
+  .garden *::after {
     animation-duration: 0.001ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;

@@ -10,7 +10,7 @@ export const metadata: Metadata = {
   appleWebApp: {
     capable: true,
     title: "Orkestr",
-    statusBarStyle: "black-translucent",
+    statusBarStyle: "default",
   },
   formatDetection: { telephone: false },
 };
@@ -19,7 +19,7 @@ export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   maximumScale: 1,
-  themeColor: "#070A12",
+  themeColor: "#FBF5DD",
   viewportFit: "cover",
 };
 

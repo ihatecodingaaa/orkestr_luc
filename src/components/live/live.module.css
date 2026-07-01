@@ -1,6 +1,7 @@
-/* Midnight Social Commerce — styles for the live Orkestr app.
-   Color/spacing tokens come from `.midnight` in globals.css and cascade in via
-   the DOM, so every class below resolves var(--bg), var(--primary), etc. */
+/* Garden Table — styles for the live Orkestr app.
+   Color/spacing tokens come from `.garden` in globals.css and cascade in via
+   the DOM, so every class below resolves var(--bg), var(--primary), etc.
+   Warm green + cream: near-white cards on cream, deep-green ink, soft shadows. */
 
 .app {
   min-height: 100vh;
@@ -261,11 +262,11 @@
 .heroTitle {
   font-family: var(--font-head);
   font-size: clamp(34px, 6vw, 60px);
-  font-weight: 700;
+  font-weight: 800;
   line-height: 1.04;
   letter-spacing: -0.03em;
   max-width: 16ch;
-  background: linear-gradient(120deg, #fff 30%, color-mix(in srgb, var(--primary-2) 75%, #fff));
+  background: linear-gradient(118deg, var(--primary-2) 12%, var(--primary) 92%);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
@@ -361,7 +362,7 @@
 }
 .groupEmoji {
   font-size: 30px;
-  filter: drop-shadow(0 6px 14px rgba(0, 0, 0, 0.4));
+  filter: drop-shadow(0 6px 12px rgba(13, 83, 14, 0.18));
 }
 .groupName {
   font-family: var(--font-head);
@@ -413,12 +414,13 @@
 .walletNote {
   font-size: 13.5px;
   line-height: 1.6;
-  color: var(--muted-2);
+  color: var(--muted);
   max-width: 70ch;
   padding: 16px 18px;
-  border-left: 2px solid color-mix(in srgb, var(--primary) 60%, transparent);
-  background: color-mix(in srgb, var(--panel-strong) 50%, transparent);
-  border-radius: 0 12px 12px 0;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--primary);
+  background: color-mix(in srgb, var(--primary-soft) 55%, var(--panel));
+  border-radius: 0 14px 14px 0;
 }
 
 /* ===================== ROOM ===================== */
@@ -1286,18 +1288,24 @@
   font-weight: 700;
 }
 
-/* ---- payment proof (the wow card) ---- */
+/* ---- payment proof (the wow card, styled as a premium receipt) ---- */
 .proofCard {
   position: relative;
   overflow: hidden;
-  padding: 26px;
+  padding: 30px 26px 26px;
   border-radius: var(--ork-radius-lg);
-  background:
-    linear-gradient(160deg, color-mix(in srgb, var(--primary) 14%, transparent), transparent 55%),
-    var(--panel-strong);
-  border: 1px solid color-mix(in srgb, var(--primary) 36%, transparent);
+  background: linear-gradient(180deg, #FFFDF2 0%, var(--receipt) 100%);
+  border: 1px solid color-mix(in srgb, var(--primary) 26%, var(--border));
   box-shadow: var(--ork-glow-primary), var(--ork-shadow);
   animation: ork-fade-up 360ms ease both;
+}
+/* Green "verified" ribbon along the top edge of the receipt. */
+.proofCard::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 5px;
+  background: linear-gradient(90deg, var(--primary), var(--money));
 }
 .proofHead {
   position: relative;
@@ -1601,10 +1609,10 @@
   font-size: 13.5px;
   font-weight: 600;
   color: var(--text);
-  background: color-mix(in srgb, var(--panel-strong) 88%, transparent);
+  background: color-mix(in srgb, var(--panel-strong) 92%, #ffffff);
   border: 1px solid var(--border-bright);
   backdrop-filter: blur(14px);
-  box-shadow: 0 16px 40px -16px rgba(2, 6, 23, 0.9);
+  box-shadow: 0 16px 36px -18px rgba(13, 83, 14, 0.35);
   cursor: pointer;
   transition: transform 160ms ease, border-color 160ms ease;
 }
@@ -1623,10 +1631,10 @@
   width: min(310px, calc(100vw - 32px));
   padding: 16px;
   border-radius: 18px;
-  background: color-mix(in srgb, var(--panel-strong) 94%, transparent);
+  background: color-mix(in srgb, var(--panel-strong) 60%, #ffffff);
   border: 1px solid var(--border-bright);
   backdrop-filter: blur(18px);
-  box-shadow: 0 28px 60px -20px rgba(2, 6, 23, 0.95);
+  box-shadow: 0 28px 56px -22px rgba(13, 83, 14, 0.40);
   animation: ork-fade-up 200ms ease both;
 }
 .demoPanelHead {
@@ -1927,7 +1935,7 @@
   max-width: 160px;
   border-radius: 12px;
   overflow: hidden;
-  background: var(--panel-strong);
+  background: #FFFDF5;
   border: 1px solid var(--border);
   display: grid;
   place-items: center;
@@ -2093,8 +2101,9 @@
   padding: 12px 14px;
   margin-bottom: 14px;
   border-radius: 12px;
-  background: linear-gradient(135deg, color-mix(in srgb, var(--primary) 26%, transparent), color-mix(in srgb, var(--primary-2) 20%, transparent));
-  border: 1px solid color-mix(in srgb, var(--primary) 45%, transparent);
+  background: linear-gradient(135deg, var(--primary), var(--primary-2));
+  border: 1px solid transparent;
+  box-shadow: 0 12px 26px -16px color-mix(in srgb, var(--primary) 85%, transparent);
   cursor: pointer;
   transition: transform 140ms ease, filter 160ms ease;
 }
@@ -2398,4 +2407,62 @@
   .inviteGrid {
     grid-template-columns: repeat(2, 1fr);
   }
+}
+
+/* ===================== WALLET LAB (presenter-only, collapsed) =====================
+   Secondary, opt-in panel showing PUBLIC chain details only. There is no wallet
+   connect anywhere in the product — friends never hold or link crypto. */
+.walletLab {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 2px 18px 18px;
+}
+.walletLabIntro {
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+.walletLabGrid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.walletLabRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+  flex-wrap: wrap;
+  padding: 11px 14px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-soft) 55%, transparent);
+  border: 1px solid var(--border);
+}
+.walletLabLabel {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted-2);
+  white-space: nowrap;
+}
+.walletLabValue {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12.5px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+.walletLabValue a {
+  color: var(--primary-2);
+  font-weight: 600;
+}
+.walletLabValue a:hover {
+  text-decoration: underline;
+}
+.walletLabFoot {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--muted-2);
 }
