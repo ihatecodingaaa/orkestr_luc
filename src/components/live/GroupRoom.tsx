@@ -18,6 +18,7 @@ import {
   PERSONAS,
   SEED_CHAT,
   TIMELINE_STEPS,
+  X402_PROOF,
   emptyConstraints,
   isReadyToSubmit,
   localRoomId,
@@ -32,6 +33,7 @@ import {
   markReady,
   paymentMode,
   readLiveState,
+  shortHash,
   submitConstraints,
 } from "@/lib/orkestr-api";
 import type { Constraints, LiveState, Member, PublicMember } from "@/lib/orkestr-api";
@@ -117,6 +119,63 @@ function HowToDemo() {
           <li>Watch the agents discover venues, negotiate, and book.</li>
           <li>Reveal the x402 USDC payment proof — the WOW moment.</li>
         </ol>
+      ) : null}
+    </div>
+  );
+}
+
+// Presenter-only, collapsed by default. Shows PUBLIC chain details only — there
+// is no wallet connect anywhere in Orkestr, and friends never link crypto.
+function WalletLab() {
+  const [open, setOpen] = useState(false);
+  const p = X402_PROOF;
+  return (
+    <div className={s.howto}>
+      <button
+        type="button"
+        className={s.howtoToggle}
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+      >
+        <span className={s.howtoTitle}>Wallet Lab · payment rails</span>
+        <span className={s.howtoChevron} aria-hidden>
+          {open ? "Hide" : "Show"}
+        </span>
+      </button>
+      {open ? (
+        <div className={s.walletLab}>
+          <p className={s.walletLabIntro}>
+            Public chain details for judges. Friends never hold or connect a wallet — Orkestr&apos;s
+            agent wallet pays the merchant wallet once, then the group splits internally.
+          </p>
+          <div className={s.walletLabGrid}>
+            <div className={s.walletLabRow}>
+              <span className={s.walletLabLabel}>Orkestr Agent Wallet</span>
+              <code className={s.walletLabValue}>{p.buyer}</code>
+            </div>
+            <div className={s.walletLabRow}>
+              <span className={s.walletLabLabel}>Merchant Wallet</span>
+              <code className={s.walletLabValue}>{p.merchant}</code>
+            </div>
+            <div className={s.walletLabRow}>
+              <span className={s.walletLabLabel}>Asset</span>
+              <span className={s.walletLabValue}>{p.network} USDC</span>
+            </div>
+            <div className={s.walletLabRow}>
+              <span className={s.walletLabLabel}>Amount</span>
+              <span className={s.walletLabValue}>{p.amount}</span>
+            </div>
+            <div className={s.walletLabRow}>
+              <span className={s.walletLabLabel}>Verified tx</span>
+              <span className={s.walletLabValue}>
+                <a href={p.basescan} target="_blank" rel="noreferrer">
+                  {shortHash(p.txHash, 10, 8)} ↗
+                </a>
+              </span>
+            </div>
+          </div>
+          <p className={s.walletLabFoot}>Read-only — opening this panel never starts a payment.</p>
+        </div>
       ) : null}
     </div>
   );
@@ -377,18 +436,45 @@ export function GroupRoom({
     [pushActivity],
   );
 
+  // Presenter jump shortcuts (Agent workbench / Reveal proof) can skip past the
+  // squad submitting. Seed every member as ready with their persona preset so a
+  // revealed plan is never shown behind empty forms — readiness reads 5/5 and
+  // cards render their completed state. Local/demo only: no backend writes, and
+  // it preserves any real constraints a friend already submitted (natural flow
+  // and phone submissions are untouched).
+  const seedAllReady = useCallback(() => {
+    setForms((prev) => {
+      const next = { ...prev };
+      for (const m of roomMembers) {
+        const current = prev[m.id];
+        if (current && isReadyToSubmit(current)) continue; // keep real input
+        const demo = personaById(m.id)?.demo;
+        next[m.id] = demo ? cloneConstraints(demo) : (current ?? emptyConstraints());
+      }
+      return next;
+    });
+    setSubmitted(Object.fromEntries(roomMembers.map((m) => [m.id, true])));
+    roomMembers.forEach((m) => submittedRef.current.add(m.id));
+  }, [roomMembers]);
+
   const jumpToWorking = useCallback(() => {
     if (revealed) return;
+    seedAllReady();
+    // Presenter is driving manually — block the readiness effect from also
+    // auto-firing the pipeline once seeding pushes readiness to 5/5.
+    startedRef.current = true;
     setWorking(true);
     setTimelineStep((p) => (p < 1 ? 1 : p));
     pushActivity({ kind: "system", text: "Skipped ahead to the agent workbench" });
-  }, [revealed, pushActivity]);
+  }, [revealed, seedAllReady, pushActivity]);
 
   const revealProof = useCallback(() => {
+    seedAllReady();
+    startedRef.current = true;
     setWorking(false);
     setTimelineStep(TIMELINE_STEPS.length);
     setRevealed(true);
-  }, []);
+  }, [seedAllReady]);
 
   const resetDemo = useCallback(async () => {
     setBusy(true);
@@ -613,6 +699,8 @@ export function GroupRoom({
       </div>
 
       {isLive ? <HowToDemo /> : null}
+
+      {isLive ? <WalletLab /> : null}
 
       {isLive ? (
         <DemoControls

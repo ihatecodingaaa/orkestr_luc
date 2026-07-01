@@ -132,8 +132,14 @@ export function presenterLink(roomId: string): string {
   return `${originBase()}/?room=${encodeURIComponent(roomId)}`;
 }
 
-export function participantLink(roomId: string, memberId: string): string {
-  return `${originBase()}/?room=${encodeURIComponent(roomId)}&member=${encodeURIComponent(memberId)}`;
+// `origin` is threaded in from a mounted client so server and first client
+// render agree (avoids a hydration mismatch on the invite links / QR src).
+export function participantLink(
+  roomId: string,
+  memberId: string,
+  origin: string = originBase(),
+): string {
+  return `${origin}/?room=${encodeURIComponent(roomId)}&member=${encodeURIComponent(memberId)}`;
 }
 
 // Remote QR image (real, scannable) with a CSS placeholder fallback baked into
@@ -144,8 +150,8 @@ export function qrImageUrl(data: string, size = 168): string {
     size: `${size}x${size}`,
     data,
     margin: "0",
-    bgcolor: "0F172A",
-    color: "F8FAFC",
+    bgcolor: "FFFDF5",
+    color: "0D530E",
     qzone: "1",
   });
   return `https://api.qrserver.com/v1/create-qr-code/?${params.toString()}`;
@@ -322,11 +328,11 @@ export const DEMO_GROUPS: DemoGroup[] = [
 
 // Friendly, centralized copy (also keeps apostrophes out of JSX text).
 export const COPY = {
-  heroTitle: "Plan dinner without the group chat chaos.",
+  heroTitle: "Dinner plans without the group chat chaos.",
   heroSub:
-    "Everyone gives their constraints. Orkestr's AI agents find the compromise, book it, and prove payment with x402 USDC on Base.",
+    "Everyone shares constraints. Orkestr's agents find the compromise, book the table, and show verified x402 payment proof.",
   walletExplainer:
-    "The friends don't each need a wallet. Once the group agrees, Orkestr's payment agent pays the merchant agent through x402.",
+    "Friends don't need wallets. Orkestr's payment agent pays the merchant agent once, then the group splits internally.",
   // Shown while the group is still filling in (ready_count < members_total).
   agentsStartHint:
     "Agents start once everyone submits. You can nudge friends or continue with Demo Cast.",

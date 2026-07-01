@@ -11,8 +11,8 @@ export default function manifest(): MetadataRoute.Manifest {
     start_url: "/",
     display: "standalone",
     orientation: "portrait",
-    background_color: "#070A12",
-    theme_color: "#070A12",
+    background_color: "#FBF5DD",
+    theme_color: "#FBF5DD",
     categories: ["food", "social", "productivity"],
     icons: [{ src: "/favicon.ico", sizes: "any", type: "image/x-icon" }],
   };

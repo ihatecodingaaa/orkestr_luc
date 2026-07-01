@@ -30,8 +30,8 @@ export function PaymentProofCard() {
     <div className={s.proofCard}>
       <div className={s.proofHead}>
         <div>
-          <span className={s.proofKicker}>Real x402 payment proof</span>
-          <h2 className={s.proofTitle}>USDC payment verified</h2>
+          <span className={s.proofKicker}>Verified x402 receipt</span>
+          <h2 className={s.proofTitle}>Paid — {p.amount} on Base</h2>
         </div>
         <StatusPill kind="paid">{p.status}</StatusPill>
       </div>
