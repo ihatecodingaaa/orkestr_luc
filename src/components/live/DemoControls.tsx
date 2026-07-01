@@ -1,47 +1,115 @@
 "use client";
 
 import { useState } from "react";
+import { Avatar } from "./primitives";
 import s from "./live.module.css";
 
 export type DemoAction = {
   label: string;
-  hint: string;
+  hint?: string;
   onClick: () => void;
   tone?: "primary" | "ghost";
+  disabled?: boolean;
 };
 
-export function DemoControls({ actions, busy }: { actions: DemoAction[]; busy?: boolean }) {
+export type DemoFriend = {
+  id: string;
+  name: string;
+  ready: boolean;
+  onSimulate: () => void;
+};
+
+export type DemoSection = {
+  title: string;
+  actions: DemoAction[];
+};
+
+// Presenter-only "Demo Cast" — runs the whole five-friend story from one laptop.
+// Styled as a polished presenter mode, never raw dev tools. Collapsible.
+export function DemoControls({
+  friends,
+  autoRun,
+  sections,
+  busy,
+  autoRunning,
+}: {
+  friends: DemoFriend[];
+  autoRun: DemoAction;
+  sections: DemoSection[];
+  busy?: boolean;
+  autoRunning?: boolean;
+}) {
   const [open, setOpen] = useState(false);
+  const allIn = friends.length > 0 && friends.every((f) => f.ready);
 
   return (
     <div className={s.demoDock}>
       {open ? (
-        <div className={s.demoPanel} role="dialog" aria-label="Presenter controls">
+        <div className={s.demoPanel} role="dialog" aria-label="Demo Cast presenter controls">
           <div className={s.demoPanelHead}>
-            <span className={s.demoPanelTitle}>Presenter controls</span>
+            <div>
+              <span className={s.demoPanelTitle}>Demo Cast</span>
+              <span className={s.demoPanelSub}>
+                Running solo? Simulate friends joining from their phones.
+              </span>
+            </div>
             <button
               type="button"
               className={s.demoClose}
               onClick={() => setOpen(false)}
-              aria-label="Hide presenter controls"
+              aria-label="Hide Demo Cast"
             >
               ✕
             </button>
           </div>
-          <div className={s.demoActions}>
-            {actions.map((a) => (
+
+          <div className={s.demoFriends}>
+            {friends.map((f) => (
               <button
-                key={a.label}
+                key={f.id}
                 type="button"
-                className={`${s.demoBtn} ${a.tone === "primary" ? s.demoBtnPrimary : ""}`}
-                onClick={a.onClick}
-                disabled={busy}
+                className={`${s.demoFriend} ${f.ready ? s.demoFriendIn : ""}`}
+                onClick={f.onSimulate}
+                disabled={busy || f.ready}
+                aria-label={f.ready ? `${f.name} is in` : `Simulate ${f.name} submitting`}
               >
-                <strong>{a.label}</strong>
-                <span>{a.hint}</span>
+                <Avatar id={f.id} size={30} ring={f.ready} />
+                <span className={s.demoFriendName}>{f.name}</span>
+                <span className={s.demoFriendState}>{f.ready ? "✓ In" : "Submit"}</span>
               </button>
             ))}
           </div>
+
+          <button
+            type="button"
+            className={s.demoAuto}
+            onClick={autoRun.onClick}
+            disabled={busy || autoRunning || allIn}
+          >
+            <strong>{autoRunning ? "Friends replying…" : autoRun.label}</strong>
+            <span>{autoRun.hint}</span>
+          </button>
+
+          {sections.map((section) => (
+            <div key={section.title} className={s.demoSection}>
+              <span className={s.demoSectionTitle}>{section.title}</span>
+              <div className={s.demoActions}>
+                {section.actions.map((a) => (
+                  <button
+                    key={a.label}
+                    type="button"
+                    className={`${s.demoBtn} ${a.tone === "primary" ? s.demoBtnPrimary : ""}`}
+                    onClick={a.onClick}
+                    disabled={busy || a.disabled}
+                  >
+                    <strong>{a.label}</strong>
+                    {a.hint ? <span>{a.hint}</span> : null}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+
           <span className={s.demoSafe}>Demo-safe — never spends real USDC</span>
         </div>
       ) : null}
@@ -53,7 +121,7 @@ export function DemoControls({ actions, busy }: { actions: DemoAction[]; busy?: 
         aria-expanded={open}
       >
         <span className={s.demoToggleDot} aria-hidden />
-        {open ? "Hide controls" : "Demo controls"}
+        {open ? "Hide Demo Cast" : "Demo Cast"}
       </button>
     </div>
   );

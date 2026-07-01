@@ -9,7 +9,8 @@ import { FinalPlanCard } from "./FinalPlanCard";
 import { PaymentProofCard } from "./PaymentProofCard";
 import { SettlementCard } from "./SettlementCard";
 import { DemoControls } from "./DemoControls";
-import type { DemoAction } from "./DemoControls";
+import type { DemoFriend, DemoSection } from "./DemoControls";
+import { InvitePanel } from "./InvitePanel";
 import type { ActivityItem } from "./ActivityFeed";
 import type { PillKind } from "./primitives";
 import {
@@ -19,18 +20,22 @@ import {
   TIMELINE_STEPS,
   emptyConstraints,
   isReadyToSubmit,
+  localRoomId,
   personaById,
   personName,
+  presenterLink,
 } from "@/lib/demo";
 import type { DemoGroup } from "@/lib/demo";
 import {
   createLiveSession,
   getStatus,
   markReady,
+  paymentMode,
   readLiveState,
   submitConstraints,
 } from "@/lib/orkestr-api";
-import type { Constraints, LiveState, Member } from "@/lib/orkestr-api";
+import type { Constraints, LiveState, Member, PublicMember } from "@/lib/orkestr-api";
+import { usePublicSession } from "@/lib/useRoom";
 import s from "./live.module.css";
 
 const PERSONA_MEMBERS: Member[] = PERSONAS.map((p) => ({ id: p.id, name: p.name }));
@@ -53,11 +58,83 @@ function memberForms(members: Member[], usePersonaDefaults = false): Record<stri
   );
 }
 
-export function GroupRoom({ group, onBack }: { group: DemoGroup; onBack: () => void }) {
+// A friend who submitted from their own phone shows up here via polling — turn
+// their public snapshot back into the same Constraints shape the cards render.
+function constraintsFromPublic(pm?: PublicMember): Constraints | undefined {
+  if (!pm?.constraints) return undefined;
+  return {
+    days: pm.constraints.available_days ?? [],
+    budget: pm.constraints.budget_max != null ? String(pm.constraints.budget_max) : "",
+    dietary: pm.constraints.dietary ?? [],
+    freeform: pm.freeform ?? "",
+  };
+}
+
+function SafetyNote({ realX402 }: { realX402: boolean }) {
+  if (realX402) {
+    return (
+      <div className={`${s.safety} ${s.safetyWarn}`} role="alert">
+        <span className={s.safetyDot} aria-hidden />
+        <div className={s.safetyText}>
+          <strong>Live x402 payment detected</strong>
+          <span>Check ENABLE_LIVE_REAL_X402 before continuing — normal demos stay mock-safe.</span>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className={`${s.safety} ${s.safetyOk}`}>
+      <span className={s.safetyDot} aria-hidden />
+      <div className={s.safetyText}>
+        <strong>Demo-safe payment mode</strong>
+        <span>No live USDC is spent here — the verified x402 receipt is shown as proof.</span>
+      </div>
+    </div>
+  );
+}
+
+function HowToDemo() {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className={s.howto}>
+      <button
+        type="button"
+        className={s.howtoToggle}
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+      >
+        <span className={s.howtoTitle}>How to demo this</span>
+        <span className={s.howtoChevron} aria-hidden>
+          {open ? "Hide" : "Show"}
+        </span>
+      </button>
+      {open ? (
+        <ol className={s.howtoList}>
+          <li>Open this command center on your laptop or projector.</li>
+          <li>Share the invite links — or let friends scan their QR cards.</li>
+          <li>Friends submit constraints on their phones.</li>
+          <li>No phones around? Use Demo Cast to simulate replies.</li>
+          <li>Watch the agents discover venues, negotiate, and book.</li>
+          <li>Reveal the x402 USDC payment proof — the WOW moment.</li>
+        </ol>
+      ) : null}
+    </div>
+  );
+}
+
+export function GroupRoom({
+  group,
+  onBack,
+  boundRoomId,
+}: {
+  group: DemoGroup;
+  onBack: () => void;
+  boundRoomId?: string;
+}) {
   const isLive = group.mode === "live";
   const initialMembers = isLive ? [] : PERSONA_MEMBERS;
 
-  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(boundRoomId ?? null);
   const [members, setMembers] = useState<Member[]>(initialMembers);
   const [forms, setForms] = useState<Record<string, Constraints>>(() =>
     memberForms(initialMembers, !isLive),
@@ -71,17 +148,39 @@ export function GroupRoom({ group, onBack }: { group: DemoGroup; onBack: () => v
   const [working, setWorking] = useState(false);
   const [timelineStep, setTimelineStep] = useState(0);
   const [revealed, setRevealed] = useState(!isLive);
-  const [error, setError] = useState<string | null>(null);
+  // Soft, demo-safe sync state — we never surface raw backend errors to the UI.
+  // Real errors still go to the console (see usePublicSession + the catches).
+  const [syncWarn, setSyncWarn] = useState(false);
+  const [noticeDismissed, setNoticeDismissed] = useState(false);
+  // Backend couldn't mint a room — we run on a local id so links + reveal still
+  // work. When true we stop polling /public (it would only 404) and skip writes.
+  const [localRoom, setLocalRoom] = useState(false);
 
   const [nudged, setNudged] = useState<string[]>([]);
   const [activity, setActivity] = useState<ActivityItem[]>(seedActivity);
   const [busy, setBusy] = useState(false);
+  const [autoRunning, setAutoRunning] = useState(false);
 
-  // Refs let us trigger the pipeline from the submit handler (the event that
-  // makes it 5/5) instead of a render effect — avoids cascading-render lint and
-  // matches "you might not need an effect".
   const submittedRef = useRef<Set<string>>(new Set());
   const startedRef = useRef(false);
+  const autoRunRef = useRef(false);
+  const readyIdsRef = useRef<Set<string>>(new Set());
+  const stageRef = useRef<HTMLDivElement>(null);
+  const prevStageRef = useRef<"social" | "working" | "final">("social");
+
+  // Cross-device sync: reflect friends who submit from their own phones.
+  // Skip polling a local-only room — the backend has no record of it.
+  const pub = usePublicSession(sessionId, {
+    enabled: isLive && Boolean(sessionId) && !localRoom,
+  });
+  const backendReady = useMemo(() => new Set(pub.data?.ready ?? []), [pub.data]);
+  const pubById = useMemo(() => {
+    const map: Record<string, PublicMember> = {};
+    (pub.data?.members ?? []).forEach((m) => {
+      map[m.id] = m;
+    });
+    return map;
+  }, [pub.data]);
 
   const pushActivity = useCallback((item: Omit<ActivityItem, "id">) => {
     setActivity((prev) => [
@@ -90,15 +189,11 @@ export function GroupRoom({ group, onBack }: { group: DemoGroup; onBack: () => v
     ]);
   }, []);
 
-  // Default demo-safe path: animate the workbench and reveal the already
-  // verified public receipt. A live backend pipeline is opt-in only because it
-  // can run booking/payment work depending on server configuration.
   const runPipeline = useCallback(
     async (sid: string) => {
       if (startedRef.current) return;
       startedRef.current = true;
       setWorking(true);
-      setError(null);
       setTimelineStep(1);
       pushActivity({ kind: "system", text: "Everyone is in — agents started negotiating" });
       try {
@@ -113,8 +208,12 @@ export function GroupRoom({ group, onBack }: { group: DemoGroup; onBack: () => v
         setTimelineStep(TIMELINE_STEPS.length);
         setRevealed(true);
       } catch (e) {
-        setError(e instanceof Error ? e.message : "The agents hit a snag");
-        startedRef.current = false;
+        // Live pipeline unavailable — log the real error, then continue with the
+        // verified sample result so the demo never dead-ends on stage.
+        console.warn("[orkestr] live pipeline unavailable — showing sample result", e);
+        setSyncWarn(true);
+        setTimelineStep(TIMELINE_STEPS.length);
+        setRevealed(true);
       } finally {
         setWorking(false);
       }
@@ -122,11 +221,18 @@ export function GroupRoom({ group, onBack }: { group: DemoGroup; onBack: () => v
     [pushActivity],
   );
 
-  // Spin up a real live session (5 member identities) for the interactive group.
+  // Bind to a shared room id, or create a fresh live session and make the
+  // presenter URL shareable so friends' links resolve to the same backend room.
   useEffect(() => {
     if (!isLive) return;
     let active = true;
     (async () => {
+      if (boundRoomId) {
+        setSessionId(boundRoomId);
+        setMembers(PERSONA_MEMBERS);
+        setForms(memberForms(PERSONA_MEMBERS));
+        return;
+      }
       try {
         const live = await createLiveSession();
         if (!active) return;
@@ -134,72 +240,130 @@ export function GroupRoom({ group, onBack }: { group: DemoGroup; onBack: () => v
         setSessionId(live.session_id);
         setMembers(ms);
         setForms(memberForms(ms));
+        if (typeof window !== "undefined") {
+          window.history.replaceState(null, "", presenterLink(live.session_id));
+        }
       } catch (e) {
-        if (active) setError(e instanceof Error ? e.message : "Unable to reach the backend");
+        if (!active) return;
+        // Backend unreachable — fall back to a fully local demo room so the
+        // presenter can still run Demo Cast, share invite links, and reach the
+        // reveal. The real error stays in the console; the UI stays calm.
+        console.warn("[orkestr] live room unavailable — running a local demo room", e);
+        const localId = localRoomId();
+        setSessionId(localId);
+        setLocalRoom(true);
+        setMembers(PERSONA_MEMBERS);
+        setForms(memberForms(PERSONA_MEMBERS));
+        setSyncWarn(true);
+        if (typeof window !== "undefined") {
+          window.history.replaceState(null, "", presenterLink(localId));
+        }
       }
     })();
     return () => {
       active = false;
     };
-  }, [isLive]);
+  }, [isLive, boundRoomId]);
+
+  const roomMembers = members.length ? members : PERSONA_MEMBERS;
+
+  const isMemberReady = useCallback(
+    (id: string) => Boolean(submitted[id]) || backendReady.has(id),
+    [submitted, backendReady],
+  );
 
   const readyIds = useMemo(
-    () => members.filter((m) => submitted[m.id]).map((m) => m.id),
-    [members, submitted],
+    () => roomMembers.filter((m) => isMemberReady(m.id)).map((m) => m.id),
+    [roomMembers, isMemberReady],
   );
-  const allSubmitted = members.length > 0 && members.every((m) => submitted[m.id]);
+  useEffect(() => {
+    readyIdsRef.current = new Set(readyIds);
+  }, [readyIds]);
+
+  const allSubmitted = roomMembers.length > 0 && roomMembers.every((m) => isMemberReady(m.id));
 
   const submitMember = useCallback(
     async (member: Member, override?: Constraints) => {
-      if (!sessionId) return;
       const c = override ?? forms[member.id];
       if (!c || !isReadyToSubmit(c)) return;
       setSubmitting((p) => ({ ...p, [member.id]: true }));
-      if (override) setForms((p) => ({ ...p, [member.id]: override }));
+      if (override) setForms((p) => ({ ...p, [member.id]: c }));
       try {
-        await submitConstraints(sessionId, member, c);
-        await markReady(sessionId, member.id);
-        setSubmitted((p) => ({ ...p, [member.id]: true }));
-        submittedRef.current.add(member.id);
-        pushActivity({ kind: "system", text: `${member.name} submitted their constraints` });
-        // When this submit makes it 5/5, kick off the pipeline from the event.
-        if (members.length > 0 && submittedRef.current.size >= members.length) {
-          void runPipeline(sessionId);
+        // Local-only room: the backend has no record of it, so skip the writes
+        // and advance optimistically (nothing to sync, nothing to spam).
+        if (sessionId && !localRoom) {
+          await submitConstraints(sessionId, member, c);
+          await markReady(sessionId, member.id);
         }
       } catch (e) {
-        setError(e instanceof Error ? e.message : "Unable to submit constraints");
+        // Could not reach the backend — keep the real error in the console and
+        // mark the friend in locally so the demo still advances.
+        console.warn(`[orkestr] could not sync ${member.name}'s constraints — keeping local`, e);
+        setSyncWarn(true);
       } finally {
+        // Optimistic: the friend is in whether or not the backend synced.
+        setSubmitted((p) => ({ ...p, [member.id]: true }));
+        submittedRef.current.add(member.id);
         setSubmitting((p) => ({ ...p, [member.id]: false }));
       }
+      pushActivity({ kind: "system", text: `${member.name} submitted their constraints` });
     },
-    [sessionId, forms, members.length, pushActivity, runPipeline],
+    [sessionId, localRoom, forms, pushActivity],
   );
 
+  // Single canonical reveal trigger: fire once everyone (real or simulated) is
+  // in. Readiness can change from an external source (a friend submitting from
+  // their phone arrives via polling), so this reacts in an effect — deferred off
+  // the synchronous effect body, and guarded by startedRef against re-entry.
+  useEffect(() => {
+    if (!isLive || !sessionId || startedRef.current) return;
+    if (roomMembers.length === 0 || readyIds.length < roomMembers.length) return;
+    const t = window.setTimeout(() => void runPipeline(sessionId), 0);
+    return () => window.clearTimeout(t);
+  }, [isLive, sessionId, roomMembers.length, readyIds.length, runPipeline]);
+
   const editMember = useCallback((id: string) => {
-    // Local-only edit — there is no backend unready; re-submitting overwrites it.
     setSubmitted((p) => ({ ...p, [id]: false }));
     submittedRef.current.delete(id);
   }, []);
 
   const readyAll = useCallback(async () => {
-    if (!sessionId) return;
     setBusy(true);
     try {
-      await Promise.all(members.map((m) => submitMember(m, personaById(m.id)?.demo)));
+      await Promise.all(roomMembers.map((m) => submitMember(m, personaById(m.id)?.demo)));
     } finally {
       setBusy(false);
     }
-  }, [sessionId, members, submitMember]);
+  }, [roomMembers, submitMember]);
 
   const submitThree = useCallback(async () => {
-    if (!sessionId) return;
     setBusy(true);
     try {
-      await Promise.all(members.slice(0, 3).map((m) => submitMember(m, personaById(m.id)?.demo)));
+      await Promise.all(
+        roomMembers.slice(0, 3).map((m) => submitMember(m, personaById(m.id)?.demo)),
+      );
     } finally {
       setBusy(false);
     }
-  }, [sessionId, members, submitMember]);
+  }, [roomMembers, submitMember]);
+
+  // Auto-run: friends trickle in one at a time, so the readiness meter visibly
+  // climbs 1/5 → 5/5 just like real phones replying.
+  const autoRun = useCallback(async () => {
+    if (autoRunRef.current) return;
+    autoRunRef.current = true;
+    setAutoRunning(true);
+    try {
+      for (const m of roomMembers) {
+        if (readyIdsRef.current.has(m.id)) continue;
+        await submitMember(m, personaById(m.id)?.demo);
+        await new Promise((resolve) => window.setTimeout(resolve, 1200 + Math.random() * 600));
+      }
+    } finally {
+      autoRunRef.current = false;
+      setAutoRunning(false);
+    }
+  }, [roomMembers, submitMember]);
 
   const nudge = useCallback(
     (id: string) => {
@@ -213,6 +377,19 @@ export function GroupRoom({ group, onBack }: { group: DemoGroup; onBack: () => v
     [pushActivity],
   );
 
+  const jumpToWorking = useCallback(() => {
+    if (revealed) return;
+    setWorking(true);
+    setTimelineStep((p) => (p < 1 ? 1 : p));
+    pushActivity({ kind: "system", text: "Skipped ahead to the agent workbench" });
+  }, [revealed, pushActivity]);
+
+  const revealProof = useCallback(() => {
+    setWorking(false);
+    setTimelineStep(TIMELINE_STEPS.length);
+    setRevealed(true);
+  }, []);
+
   const resetDemo = useCallback(async () => {
     setBusy(true);
     setState(null);
@@ -223,17 +400,34 @@ export function GroupRoom({ group, onBack }: { group: DemoGroup; onBack: () => v
     setSubmitting({});
     setNudged([]);
     setActivity(seedActivity());
-    setError(null);
+    setSyncWarn(false);
+    setNoticeDismissed(false);
+    setLocalRoom(false);
     submittedRef.current = new Set();
     startedRef.current = false;
+    autoRunRef.current = false;
+    setAutoRunning(false);
     try {
       const live = await createLiveSession();
       const ms = live.members?.length ? live.members : PERSONA_MEMBERS;
       setSessionId(live.session_id);
       setMembers(ms);
       setForms(memberForms(ms));
+      if (typeof window !== "undefined") {
+        window.history.replaceState(null, "", presenterLink(live.session_id));
+      }
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Unable to reach the backend");
+      // Stay usable on a local demo room if the backend is unreachable.
+      console.warn("[orkestr] reset could not reach the backend — using a local demo room", e);
+      const localId = localRoomId();
+      setSessionId(localId);
+      setLocalRoom(true);
+      setMembers(PERSONA_MEMBERS);
+      setForms(memberForms(PERSONA_MEMBERS));
+      setSyncWarn(true);
+      if (typeof window !== "undefined") {
+        window.history.replaceState(null, "", presenterLink(localId));
+      }
     } finally {
       setBusy(false);
     }
@@ -255,38 +449,63 @@ export function GroupRoom({ group, onBack }: { group: DemoGroup; onBack: () => v
       ? "working"
       : "social";
 
+  // Guide the presenter forward: when the story advances off the social stage,
+  // bring the agent workbench / final plan into view. Only on forward
+  // transitions from social, and honoring reduced-motion.
+  useEffect(() => {
+    const prev = prevStageRef.current;
+    if (stage === prev) return;
+    prevStageRef.current = stage;
+    if (!isLive || prev !== "social" || stage === "social") return;
+    const reduce =
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    stageRef.current?.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
+  }, [stage, isLive]);
+
   const finalPlan = state?.plan ?? DEMO_PLAN;
-  const roomMembers = members.length ? members : PERSONA_MEMBERS;
   const perPerson = typeof finalPlan.per_person === "number" ? finalPlan.per_person : 80;
 
-  const phase = useMemo<{ label: string; kind: PillKind }>(() => {
-    if (stage === "final") return { label: "Booked & paid", kind: "paid" };
-    if (stage === "working") return { label: "Agents working", kind: "active" };
-    if (readyIds.length > 0) return { label: "Waiting for friends", kind: "warning" };
-    return { label: "Collecting constraints", kind: "info" };
-  }, [stage, readyIds.length]);
+  const realX402 =
+    paymentMode(state?.handshake?.mandate) === "x402_real" || pub.data?.payment_mode === "x402_real";
 
-  const demoActions: DemoAction[] = [
+  // Presenter-only, demo-safe notice when backend sync is unavailable (a failed
+  // write or the polling endpoint being unreachable). Never shows raw error text.
+  const showNotice = isLive && (syncWarn || Boolean(pub.error)) && !noticeDismissed;
+
+  // Single source of truth for the status pill, driven by readiness + phase:
+  //   0/5–4/5      → "Waiting for friends"
+  //   5/5, no plan → "Agents working"
+  //   plan + proof → "Booked · proof ready"
+  const phase = useMemo<{ label: string; kind: PillKind }>(() => {
+    if (stage === "final") return { label: "Booked · proof ready", kind: "paid" };
+    if (stage === "working" || allSubmitted) return { label: "Agents working", kind: "active" };
+    return { label: "Waiting for friends", kind: "warning" };
+  }, [stage, allSubmitted]);
+
+  const demoFriends: DemoFriend[] = roomMembers.map((m) => ({
+    id: m.id,
+    name: m.name,
+    ready: isMemberReady(m.id),
+    onSimulate: () => void submitMember(m, personaById(m.id)?.demo),
+  }));
+
+  const demoSections: DemoSection[] = [
     {
-      label: "Ready all 5 friends",
-      hint: "Submits demo constraints and opens the workbench",
-      onClick: () => void readyAll(),
-      tone: "primary",
+      title: "Jump to",
+      actions: [
+        { label: "Ready all 5", hint: "Submit everyone now", onClick: () => void readyAll(), tone: "primary" },
+        { label: "Show waiting room", hint: "Submit 3 of 5", onClick: () => void submitThree() },
+        { label: "Agent workbench", hint: "Skip to agents working", onClick: jumpToWorking },
+        { label: "Reveal x402 proof", hint: "Jump to the receipt", onClick: revealProof },
+      ],
     },
     {
-      label: "Show the waiting room",
-      hint: "Submit 3 of 5 to see the social wait",
-      onClick: () => void submitThree(),
-    },
-    {
-      label: "Reveal x402 proof",
-      hint: "Jump to the verified payment receipt",
-      onClick: () => setRevealed(true),
-    },
-    {
-      label: "Reset demo",
-      hint: "Start a fresh dinner room",
-      onClick: () => void resetDemo(),
+      title: "Room",
+      actions: [
+        { label: "Reset room", hint: "Fresh room + new links", onClick: () => void resetDemo() },
+      ],
     },
   ];
 
@@ -302,13 +521,29 @@ export function GroupRoom({ group, onBack }: { group: DemoGroup; onBack: () => v
         onBack={onBack}
       />
 
-      {error ? (
-        <div className={s.errorBar} role="status">
-          <span>{error}.</span>
-          <button type="button" className={s.linkBtn} onClick={() => setRevealed(true)}>
-            Show the sample result
+      {isLive ? <SafetyNote realX402={realX402} /> : null}
+
+      {showNotice ? (
+        <div className={s.notice} role="status">
+          <span className={s.noticeDot} aria-hidden />
+          <div className={s.noticeText}>
+            <strong>Live sync is warming up.</strong>
+            <span>You can continue with the sample room.</span>
+            <span className={s.noticeTech}>Backend sync unavailable.</span>
+          </div>
+          <button type="button" className={s.noticeBtn} onClick={() => setNoticeDismissed(true)}>
+            Continue demo
           </button>
         </div>
+      ) : null}
+
+      {isLive && stage === "social" ? (
+        <InvitePanel
+          roomId={sessionId}
+          members={roomMembers}
+          readyIds={readyIds}
+          localRoom={localRoom}
+        />
       ) : null}
 
       <div className={s.roomGrid}>
@@ -320,7 +555,7 @@ export function GroupRoom({ group, onBack }: { group: DemoGroup; onBack: () => v
                 type="button"
                 className={s.btnPrimarySm}
                 onClick={() => void readyAll()}
-                disabled={busy || !sessionId}
+                disabled={busy}
               >
                 {busy ? "Submitting…" : "Ready all 5"}
               </button>
@@ -328,27 +563,33 @@ export function GroupRoom({ group, onBack }: { group: DemoGroup; onBack: () => v
           </div>
 
           <div className={s.memberList}>
-            {members.length === 0 ? (
+            {roomMembers.length === 0 ? (
               <p className={s.muted}>Assembling the group…</p>
             ) : (
-              members.map((m) => (
-                <MemberConstraintCard
-                  key={m.id}
-                  member={m}
-                  value={forms[m.id] ?? emptyConstraints()}
-                  onChange={(next) => setForms((p) => ({ ...p, [m.id]: next }))}
-                  onSubmit={() => void submitMember(m)}
-                  onEdit={() => editMember(m.id)}
-                  submitted={Boolean(submitted[m.id])}
-                  submitting={Boolean(submitting[m.id])}
-                  editable={isLive}
-                />
-              ))
+              roomMembers.map((m) => {
+                const ready = isMemberReady(m.id);
+                const value = submitted[m.id]
+                  ? (forms[m.id] ?? emptyConstraints())
+                  : (constraintsFromPublic(pubById[m.id]) ?? forms[m.id] ?? emptyConstraints());
+                return (
+                  <MemberConstraintCard
+                    key={m.id}
+                    member={m}
+                    value={value}
+                    onChange={(next) => setForms((p) => ({ ...p, [m.id]: next }))}
+                    onSubmit={() => void submitMember(m)}
+                    onEdit={() => editMember(m.id)}
+                    submitted={ready}
+                    submitting={Boolean(submitting[m.id])}
+                    editable={isLive && Boolean(submitted[m.id])}
+                  />
+                );
+              })
             )}
           </div>
         </section>
 
-        <section className={s.colStage} aria-label="Live status">
+        <section className={s.colStage} aria-label="Live status" ref={stageRef}>
           {stage === "social" ? (
             <WaitingRoom
               members={roomMembers}
@@ -371,7 +612,21 @@ export function GroupRoom({ group, onBack }: { group: DemoGroup; onBack: () => v
         </section>
       </div>
 
-      {isLive ? <DemoControls actions={demoActions} busy={busy} /> : null}
+      {isLive ? <HowToDemo /> : null}
+
+      {isLive ? (
+        <DemoControls
+          friends={demoFriends}
+          autoRun={{
+            label: "Auto-run friend replies",
+            hint: "One friend submits every ~1–2s",
+            onClick: () => void autoRun(),
+          }}
+          sections={demoSections}
+          busy={busy}
+          autoRunning={autoRunning}
+        />
+      ) : null}
     </div>
   );
 }

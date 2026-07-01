@@ -913,6 +913,32 @@ button.tag-positive:hover {
   border-radius: 10px;
 }
 
+/* Dark, thin scrollbars everywhere in the live app — never a bright native bar
+   against the midnight UI (Firefox + WebKit/Chromium). */
+.midnight,
+.midnight * {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.32) transparent;
+}
+.midnight ::-webkit-scrollbar,
+.midnight::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.midnight ::-webkit-scrollbar-track,
+.midnight::-webkit-scrollbar-track {
+  background: transparent;
+}
+.midnight ::-webkit-scrollbar-thumb,
+.midnight::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.32);
+  border-radius: 999px;
+}
+.midnight ::-webkit-scrollbar-thumb:hover,
+.midnight::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.5);
+}
+
 /* Shared animations for the live app (ork- prefix avoids gallery collisions). */
 @keyframes ork-pulse {
   0%, 100% { opacity: 1; }
