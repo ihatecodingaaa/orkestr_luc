@@ -151,7 +151,7 @@ export function qrImageUrl(data: string, size = 168): string {
     data,
     margin: "0",
     bgcolor: "FFFDF5",
-    color: "0D530E",
+    color: "174A1C",
     qzone: "1",
   });
   return `https://api.qrserver.com/v1/create-qr-code/?${params.toString()}`;
