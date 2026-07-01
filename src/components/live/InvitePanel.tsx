@@ -138,7 +138,8 @@ export function InvitePanel({
         <div>
           <h3 className={s.inviteTitle}>Invite friends</h3>
           <span className={s.inviteSub}>
-            Each friend scans their card — or tap “Open as” to demo from this device.
+            Each friend opens their own link on their phone. Scan the code, or tap “Open as” to
+            demo from this device.
           </span>
           {localRoom ? (
             <span className={s.inviteHint}>

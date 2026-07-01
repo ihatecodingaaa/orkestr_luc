@@ -137,7 +137,7 @@ function WalletLab() {
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
       >
-        <span className={s.howtoTitle}>Wallet Lab · payment rails</span>
+        <span className={s.howtoTitle}>How the agent paid · payment rails</span>
         <span className={s.howtoChevron} aria-hidden>
           {open ? "Hide" : "Show"}
         </span>
@@ -145,8 +145,9 @@ function WalletLab() {
       {open ? (
         <div className={s.walletLab}>
           <p className={s.walletLabIntro}>
-            Public chain details for judges. Friends never hold or connect a wallet — Orkestr&apos;s
-            agent wallet pays the merchant wallet once, then the group splits internally.
+            The public payment rail, for anyone curious. Friends never hold or connect a wallet —
+            Orkestr&apos;s agent wallet pays the merchant wallet once, then the group splits
+            internally.
           </p>
           <div className={s.walletLabGrid}>
             <div className={s.walletLabRow}>
