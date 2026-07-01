@@ -7,6 +7,12 @@ import { COPY, PREPARING } from "@/lib/demo";
 import type { Member } from "@/lib/orkestr-api";
 import s from "./live.module.css";
 
+// Small subtext helper so we never claim "waiting" once everyone is in.
+function waitingSubtext(count: number, total: number, allIn: boolean): string {
+  if (allIn) return `${count} of ${total} replied. ${COPY.agentsWorkingHint}`;
+  return `${count} of ${total} replied. ${COPY.agentsStartHint}`;
+}
+
 export function WaitingRoom({
   members,
   readyIds,
@@ -22,15 +28,16 @@ export function WaitingRoom({
 }) {
   const count = readyIds.length;
   const total = members.length || 5;
+  const allIn = total > 0 && count >= total;
 
   return (
     <div className={s.waiting}>
       <div className={s.stageHead}>
-        <span className={s.stageKicker}>Waiting room</span>
-        <h2 className={s.stageTitle}>Your agents are waiting for friends</h2>
-        <p className={s.stageSub}>
-          {count} of {total} replied. {COPY.agentsStartHint}
-        </p>
+        <span className={s.stageKicker}>{allIn ? "Agents working" : "Waiting room"}</span>
+        <h2 className={s.stageTitle}>
+          {allIn ? "Everyone is in. Agents are working." : "Your agents are waiting for friends"}
+        </h2>
+        <p className={s.stageSub}>{waitingSubtext(count, total, allIn)}</p>
       </div>
 
       <div className={s.friendRow}>
@@ -65,7 +72,9 @@ export function WaitingRoom({
       </div>
 
       <div className={s.prepBlock}>
-        <span className={s.prepLabel}>While you wait, Orkestr is preparing</span>
+        <span className={s.prepLabel}>
+          {allIn ? "Orkestr is preparing your plan" : "While you wait, Orkestr is preparing"}
+        </span>
         <div className={s.prepGrid}>
           {PREPARING.map((p) => (
             <div key={p.title} className={s.prepCard}>

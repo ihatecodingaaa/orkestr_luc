@@ -85,6 +85,14 @@ export function personName(id?: string): string {
   return personaById(id)?.name ?? id ?? "Agent";
 }
 
+// "Alice" · "Alice and Bob" · "Alice, Bob, and Carol" — never "A and B and C".
+export function formatNames(names: string[]): string {
+  if (names.length === 0) return "";
+  if (names.length === 1) return names[0];
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
+}
+
 export function personInitial(id?: string): string {
   return personaById(id)?.initial ?? (id ? id.slice(0, 1) : "?");
 }
@@ -95,6 +103,52 @@ export function friendColorVar(id?: string): string {
 
 export function emptyConstraints(): Constraints {
   return { days: [], budget: "", dietary: [], freeform: "" };
+}
+
+// Deep copy so a prefilled persona form can be edited without mutating defaults.
+export function cloneDemoConstraints(c: Constraints): Constraints {
+  return { ...c, days: [...c.days], dietary: [...c.dietary] };
+}
+
+// ---- shareable room links -------------------------------------------------
+// Deep links use query params on the existing page (Option A): the presenter
+// command center is /?room=ORK-XXXX and each friend's phone view is
+// /?room=ORK-XXXX&member=P-00N. Built from the live origin so a copied link
+// or scanned QR opens straight into that member's mobile experience.
+
+function originBase(): string {
+  if (typeof window !== "undefined") return window.location.origin;
+  return "";
+}
+
+// Offline/local fallback room id — used when the backend can't mint one so the
+// presenter still gets shareable demo links and the flow never dead-ends.
+export function localRoomId(): string {
+  const rand = Math.random().toString(36).slice(2, 6).toUpperCase();
+  return `ORK-${rand}`;
+}
+
+export function presenterLink(roomId: string): string {
+  return `${originBase()}/?room=${encodeURIComponent(roomId)}`;
+}
+
+export function participantLink(roomId: string, memberId: string): string {
+  return `${originBase()}/?room=${encodeURIComponent(roomId)}&member=${encodeURIComponent(memberId)}`;
+}
+
+// Remote QR image (real, scannable) with a CSS placeholder fallback baked into
+// the card UI. No build dependency, no install risk — just an <img> of a URL
+// that contains only the public room link (never a secret).
+export function qrImageUrl(data: string, size = 168): string {
+  const params = new URLSearchParams({
+    size: `${size}x${size}`,
+    data,
+    margin: "0",
+    bgcolor: "0F172A",
+    color: "F8FAFC",
+    qzone: "1",
+  });
+  return `https://api.qrserver.com/v1/create-qr-code/?${params.toString()}`;
 }
 
 export function isReadyToSubmit(c: Constraints): boolean {
@@ -273,6 +327,13 @@ export const COPY = {
     "Everyone gives their constraints. Orkestr's AI agents find the compromise, book it, and prove payment with x402 USDC on Base.",
   walletExplainer:
     "The friends don't each need a wallet. Once the group agrees, Orkestr's payment agent pays the merchant agent through x402.",
+  // Shown while the group is still filling in (ready_count < members_total).
   agentsStartHint:
-    "Agents start negotiating once everyone submits. Until then, nudge friends or drop a note — nothing is blocked.",
+    "Agents start once everyone submits. You can nudge friends or continue with Demo Cast.",
+  // Shown the moment everyone is in (ready_count == members_total, plan pending).
+  agentsWorkingHint:
+    "Orkestr is discovering venues, checking trade-offs, and preparing the booking.",
+  // Participant-facing wait note — no presenter-only Demo Cast mention.
+  participantWaitHint:
+    "Your agent is negotiating on your behalf. The plan and payment proof appear here the moment everyone's in.",
 } as const;

@@ -90,6 +90,38 @@ export type StatusResponse = {
   fail_reason?: string | null;
 };
 
+// Read-only public snapshot used for cross-device sync (presenter ↔ phones).
+// Mirrors GET /api/session/{sid}/public — no secrets, never runs the pipeline.
+export type PublicMember = {
+  id: string;
+  name: string;
+  avatar?: string | null;
+  submitted: boolean;
+  ready: boolean;
+  constraints: {
+    available_days?: string[];
+    budget_max?: number | null;
+    dietary?: string[];
+  } | null;
+  freeform: string;
+};
+
+export type PublicSession = {
+  session_id: string;
+  name?: string;
+  live: boolean;
+  phase: string;
+  members: PublicMember[];
+  ready: string[];
+  ready_count: number;
+  submitted_count: number;
+  members_total: number;
+  plan_ready: boolean;
+  booking_ref?: string | null;
+  payment_mode?: string | null;
+  booking_failed: boolean;
+};
+
 export type LiveState = {
   phase: string;
   plan: Plan;
@@ -152,6 +184,11 @@ export async function markReady(sessionId: string, personId: string): Promise<vo
 
 export async function getStatus(sessionId: string): Promise<StatusResponse> {
   return fetchJson<StatusResponse>(`/api/status/${sessionId}`);
+}
+
+// Safe to poll from any device — read-only, never triggers the pipeline.
+export async function readPublicSession(sessionId: string): Promise<PublicSession> {
+  return fetchJson<PublicSession>(`/api/session/${sessionId}/public`);
 }
 
 export async function approveTransfer(sessionId: string, personId: string): Promise<void> {

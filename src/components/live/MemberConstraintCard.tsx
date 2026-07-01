@@ -74,9 +74,11 @@ export function MemberConstraintCard({
           </div>
           {value.freeform ? <p className={s.memberNote}>“{value.freeform}”</p> : null}
           {editable ? (
-            <button type="button" className={s.linkBtn} onClick={onEdit} disabled={submitting}>
-              Edit
-            </button>
+            <div className={s.memberActions}>
+              <button type="button" className={s.linkBtn} onClick={onEdit} disabled={submitting}>
+                Edit
+              </button>
+            </div>
           ) : null}
         </div>
       ) : (

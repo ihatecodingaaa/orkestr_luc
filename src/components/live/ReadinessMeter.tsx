@@ -1,4 +1,5 @@
 import { ProgressRing } from "./primitives";
+import { formatNames } from "@/lib/demo";
 import type { Member } from "@/lib/orkestr-api";
 import s from "./live.module.css";
 
@@ -16,10 +17,15 @@ export function ReadinessMeter({
   const count = ready.length;
   const total = members.length || 5;
 
+  // Compact, human waiting line — never "A and B and C", never a giant list.
   const waitingLine =
     pending.length === 0
       ? "Everyone is in — agents are on it"
-      : `Waiting for ${pending.map((p) => p.name).join(" and ")}`;
+      : count === 0
+        ? "Waiting for everyone to reply"
+        : pending.length > 2
+          ? `Waiting for ${pending.length} more friends`
+          : `Waiting for ${formatNames(pending.map((p) => p.name))}`;
 
   return (
     <div className={s.readiness}>
