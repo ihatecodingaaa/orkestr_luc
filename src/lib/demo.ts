@@ -2,7 +2,7 @@
 // receipt, a static fallback plan for resilient demoing, and the demo groups.
 // Nothing here is secret — wallet addresses and the tx hash are public chain data.
 
-import type { Constraints, Plan } from "@/lib/orkestr-api";
+import type { Constraints, Plan, X402Receipt } from "@/lib/orkestr-api";
 
 export const DAY_OPTIONS = ["FRI", "SAT", "SUN"] as const;
 
@@ -187,6 +187,26 @@ export const X402_PROOF = {
     "PAYMENT-SIGNATURE settled on-chain",
   ],
 } as const;
+
+// The saved verified receipt as the UI's X402Receipt model — the safe fallback
+// shown until (and unless) the presenter runs a fresh proof. Never claims to
+// have happened "just now"; it was settled in a previous testnet proof.
+export const SAVED_RECEIPT: X402Receipt = {
+  source: "saved_verified_receipt",
+  isFresh: false,
+  label: "Saved verified receipt",
+  paymentMode: X402_PROOF.paymentMode,
+  amount: X402_PROOF.amount,
+  amountBaseUnits: X402_PROOF.amountBaseUnits,
+  network: X402_PROOF.network,
+  networkId: X402_PROOF.networkId,
+  asset: X402_PROOF.asset,
+  buyer: X402_PROOF.buyer,
+  merchant: X402_PROOF.merchant,
+  txHash: X402_PROOF.txHash,
+  basescan: X402_PROOF.basescan,
+  createdAt: null,
+};
 
 // ---- static fallback plan -------------------------------------------------
 // Mirrors the seeded happy-path so demo-control jumps and a slow/unreachable

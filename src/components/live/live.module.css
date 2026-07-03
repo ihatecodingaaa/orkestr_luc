@@ -2965,3 +2965,146 @@
 .trustMuted {
   color: var(--muted-2);
 }
+
+/* ============ fresh x402 proof card additions ============ */
+/* PaymentProofCard header can carry a "Fresh proof" badge next to the pill. */
+.proofHeadPills {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.freshBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--money);
+  background: color-mix(in srgb, var(--money) 15%, transparent);
+  border: 1px solid color-mix(in srgb, var(--money) 42%, transparent);
+  border-radius: 999px;
+  padding: 4px 10px;
+  white-space: nowrap;
+}
+
+/* ===================== FRESH x402 PROOF RUN (presenter-only) ===================== */
+.freshLive {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--money);
+}
+.freshBody {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 4px 18px 18px;
+}
+.freshIntro {
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+.freshForm {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.freshField {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.freshLabel {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted-2);
+}
+.freshCode {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11.5px;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--primary-2);
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+  padding: 1px 6px;
+  border-radius: 6px;
+}
+.freshInput {
+  width: 100%;
+  font-size: 13.5px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  color: var(--text);
+  background: color-mix(in srgb, #ffffff 60%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+.freshInput:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--primary) 55%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 16%, transparent);
+}
+.freshInput:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.freshActions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.freshBtn {
+  font-family: var(--font-head);
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #fff;
+  background: linear-gradient(180deg, var(--money), #0f3413);
+  border: 1px solid color-mix(in srgb, var(--money) 60%, transparent);
+  border-radius: 999px;
+  padding: 10px 20px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: transform 140ms ease, filter 160ms ease, opacity 160ms ease;
+}
+.freshBtn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  filter: brightness(1.08);
+}
+.freshBtn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.freshStatus {
+  font-size: 12.5px;
+  line-height: 1.5;
+  font-weight: 500;
+}
+.freshReady {
+  color: var(--muted);
+}
+.freshDisabled {
+  color: var(--muted-2);
+}
+.freshOk {
+  color: var(--success);
+  font-weight: 600;
+}
+.freshErr {
+  color: var(--danger);
+  font-weight: 600;
+}
+.freshFoot {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--muted-2);
+}

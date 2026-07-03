@@ -9,6 +9,7 @@ import { FinalPlanCard } from "./FinalPlanCard";
 import { PaymentProofCard } from "./PaymentProofCard";
 import { SmartSplitCard } from "./SmartSplitCard";
 import { TrustPanel } from "./TrustPanel";
+import { FreshProofPanel } from "./FreshProofPanel";
 import { NoVerifiedVenueCard } from "./verification";
 import { DemoControls } from "./DemoControls";
 import type { DemoFriend, DemoSection } from "./DemoControls";
@@ -18,9 +19,9 @@ import type { PillKind } from "./primitives";
 import {
   DEMO_PLAN,
   PERSONAS,
+  SAVED_RECEIPT,
   SEED_CHAT,
   TIMELINE_STEPS,
-  X402_PROOF,
   emptyConstraints,
   isReadyToSubmit,
   localRoomId,
@@ -31,6 +32,7 @@ import {
 import type { DemoGroup } from "@/lib/demo";
 import {
   createLiveSession,
+  getLatestReceipt,
   getStatus,
   markReady,
   paymentMode,
@@ -38,7 +40,7 @@ import {
   shortHash,
   submitConstraints,
 } from "@/lib/orkestr-api";
-import type { Constraints, LiveState, Member, PublicMember } from "@/lib/orkestr-api";
+import type { Constraints, LiveState, Member, PublicMember, X402Receipt } from "@/lib/orkestr-api";
 import type { SplitMode } from "@/lib/split";
 import { usePublicSession, useSplit } from "@/lib/useRoom";
 import s from "./live.module.css";
@@ -129,9 +131,11 @@ function HowToDemo() {
 
 // Presenter-only, collapsed by default. Shows PUBLIC chain details only — there
 // is no wallet connect anywhere in Orkestr, and friends never link crypto.
-function WalletLab() {
+// Reflects the active receipt (saved fallback or a fresh proof) so the payment
+// rail shows the same tx the receipt card does.
+function WalletLab({ receipt }: { receipt: X402Receipt }) {
   const [open, setOpen] = useState(false);
-  const p = X402_PROOF;
+  const p = receipt;
   return (
     <div className={s.howto}>
       <button
@@ -225,6 +229,10 @@ export function GroupRoom({
   const [autoRunning, setAutoRunning] = useState(false);
   // Presenter split control — itemized by default (the whole point of Part 2).
   const [splitMode, setSplitMode] = useState<SplitMode>("itemized");
+  // Active x402 receipt shown by the proof card / trust panel / wallet lab.
+  // Defaults to the saved verified fallback; a deliberate presenter "fresh proof"
+  // run swaps in the new on-chain receipt. Reading /latest on mount NEVER spends.
+  const [receipt, setReceipt] = useState<X402Receipt>(SAVED_RECEIPT);
 
   const submittedRef = useRef<Set<string>>(new Set());
   const startedRef = useRef(false);
@@ -329,6 +337,24 @@ export function GroupRoom({
       active = false;
     };
   }, [isLive, boundRoomId]);
+
+  // On mount, ask the backend for the latest receipt (read-only — NEVER spends).
+  // If a fresh proof already exists this process (e.g. presenter ran it, then
+  // refreshed), show it; otherwise the saved fallback default stands.
+  useEffect(() => {
+    if (!isLive) return;
+    let active = true;
+    getLatestReceipt()
+      .then((r) => {
+        if (active && r && r.isFresh) setReceipt(r);
+      })
+      .catch(() => {
+        /* backend offline or endpoint absent — keep the saved fallback receipt */
+      });
+    return () => {
+      active = false;
+    };
+  }, [isLive]);
 
   const roomMembers = members.length ? members : PERSONA_MEMBERS;
 
@@ -715,8 +741,9 @@ export function GroupRoom({
                     verification={finalPlan.venue?.verification}
                     split={split}
                     venueName={finalPlan.venue?.name}
+                    receipt={receipt}
                   />
-                  <PaymentProofCard />
+                  <PaymentProofCard receipt={receipt} />
                   <SmartSplitCard
                     split={split}
                     mode={splitMode}
@@ -733,7 +760,9 @@ export function GroupRoom({
 
       {isLive ? <HowToDemo /> : null}
 
-      {isLive ? <WalletLab /> : null}
+      {isLive ? <WalletLab receipt={receipt} /> : null}
+
+      {isLive ? <FreshProofPanel onFresh={setReceipt} /> : null}
 
       {isLive ? (
         <DemoControls

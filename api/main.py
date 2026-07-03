@@ -126,6 +126,36 @@ def x402_paid_smoke(payload: dict = Body(default={}),
     return JSONResponse(status_code=status_code, content=result)
 
 
+# ---- x402: presenter-only "fresh proof" demo receipt (Railway-only) ----
+# A SEPARATE, deliberately-triggered path from the normal live flow, paid-smoke,
+# participant flow, plan computation, and split. The run endpoint sends ONE real
+# $0.001 USDC transfer only after five gates pass (feature flag + secret header +
+# exact confirm phrase + amount==1000 + cooldown/in-flight). status/latest are
+# read-only and NEVER spend. All three return only sanitized, secret-free fields.
+@app.get("/api/x402/demo-receipt/status")
+def x402_demo_receipt_status():
+    from payments import x402_demo_receipt as XDR
+
+    return XDR.demo_receipt_status()
+
+
+@app.get("/api/x402/demo-receipt/latest")
+def x402_demo_receipt_latest():
+    from payments import x402_demo_receipt as XDR
+
+    return XDR.latest_receipt()
+
+
+@app.post("/api/x402/demo-receipt/run")
+def x402_demo_receipt_run(payload: dict = Body(default={}),
+                          x_demo_secret: str = Header(default=None, alias="X-Orkestr-Demo-Secret")):
+    from payments import x402_demo_receipt as XDR
+
+    confirm = payload.get("confirm") if isinstance(payload, dict) else None
+    status_code, body_out = XDR.run_demo_receipt(x_demo_secret, confirm)
+    return JSONResponse(status_code=status_code, content=body_out)
+
+
 # ---- Phase 1: before the meal ----
 @app.post("/api/session/start")
 def session_start(payload: dict = Body(default={})):
