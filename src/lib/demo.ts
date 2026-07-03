@@ -200,7 +200,22 @@ export const DEMO_PLAN: Plan = {
   venue: {
     name: "Seoul Garden",
     address: "Tanjong Pagar, Singapore",
+    area: "Tanjong Pagar",
     tags: ["korean_bbq", "halal_options", "vegetarian_options", "group_seating"],
+    // Honest offline label: this static fallback is a SAMPLE venue. With the live
+    // pipeline + USE_GOOGLE_PLACES on, the real chosen venue arrives here already
+    // graded "Google Places verified" (with a place id + Maps link), or strict
+    // mode returns the no-verified empty state instead.
+    verification: {
+      verification_status: "demo",
+      source_kind: "demo",
+      badge: "Sample demo venue",
+      verification_notes:
+        "Built-in sample venue for the offline demo. Enable USE_GOOGLE_PLACES + the live pipeline for real Google Places verification.",
+      area: "Tanjong Pagar",
+      cuisine: "Korean BBQ",
+      confidence_score: 0.5,
+    },
   },
   total_cost: 400,
   per_person: 80,

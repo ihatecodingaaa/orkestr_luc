@@ -1,8 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import { readPublicSession } from "./orkestr-api";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { getSplit, readPublicSession } from "./orkestr-api";
 import type { PublicSession } from "./orkestr-api";
+import { demoSplit } from "./split";
+import type { MealSplit, SplitMode } from "./split";
 
 // Polls the read-only public snapshot so every device (presenter laptop + each
 // friend's phone) converges on the same room state. The endpoint never runs the
@@ -53,4 +55,67 @@ export function usePublicSession(
   }, [sessionId, enabled, intervalMs, refresh]);
 
   return { data, error, refresh };
+}
+
+// Where the split numbers came from — used only for a subtle source-of-truth
+// badge in the UI, never to gate any payment logic.
+export type SplitSource = "backend" | "local";
+
+// Smart split with a graceful fallback. When `enabled` (live pipeline on + a real
+// backend session), it asks the backend /api/split — the calculation-only source
+// of truth — and uses that result. On any failure/timeout/offline it silently
+// falls back to the local TS calculator (demoSplit), so the demo never dead-ends.
+// The backend call is read-only and never triggers a payment.
+export function useSplit(
+  sessionId: string | null,
+  mode: SplitMode,
+  { enabled = true, timeoutMs = 6000 }: { enabled?: boolean; timeoutMs?: number } = {},
+) {
+  const local = useMemo(() => demoSplit(mode), [mode]);
+  const [backend, setBackend] = useState<MealSplit | null>(null);
+  // Becomes true only once a backend fetch has settled, so the fallback note is
+  // never shown while the very first request is still in flight.
+  const [attempted, setAttempted] = useState(false);
+  const aliveRef = useRef(true);
+  const loggedRef = useRef(false);
+
+  useEffect(() => {
+    aliveRef.current = true;
+    // Not eligible for a backend split — stay on the local calculator. All state
+    // updates happen in the async callbacks below (never synchronously here).
+    if (!enabled || !sessionId) {
+      return () => {
+        aliveRef.current = false;
+      };
+    }
+    getSplit(sessionId, mode, timeoutMs)
+      .then((result) => {
+        if (!aliveRef.current) return;
+        setBackend(result);
+        setAttempted(true);
+        loggedRef.current = false;
+      })
+      .catch((e) => {
+        if (!aliveRef.current) return;
+        // Backend split unavailable — fall back to the local calculator. Log the
+        // real error once (not the UI); the view stays calm and payment-safe.
+        setBackend(null);
+        setAttempted(true);
+        if (!loggedRef.current) {
+          loggedRef.current = true;
+          console.warn(`[orkestr] backend split unavailable for ${sessionId}:`, e);
+        }
+      });
+    return () => {
+      aliveRef.current = false;
+    };
+  }, [sessionId, mode, enabled, timeoutMs]);
+
+  const useBackend = enabled && backend !== null;
+  const source: SplitSource = useBackend ? "backend" : "local";
+  const split = useBackend ? backend : local;
+  // True only after a backend attempt settled AND fell back — lets the presenter
+  // show a calm note without flashing it during the initial in-flight fetch.
+  const fellBack = enabled && Boolean(sessionId) && attempted && backend === null;
+  return { split, source, fellBack };
 }

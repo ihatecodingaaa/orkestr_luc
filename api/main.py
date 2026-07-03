@@ -181,8 +181,10 @@ def status(sid: str):
                     "members_total": len(s["members"])}
         S.compute_plan(sid)  # lazily produce the plan -> plan_ready
     if s["phase"] == "failed":
-        return {"phase": "failed", "booking_failed": True, "fail_reason": s.get("fail_reason")}
-    return {"phase": s["phase"]}
+        return {"phase": "failed", "booking_failed": True,
+                "fail_reason": s.get("fail_reason"),
+                "venue_status": s.get("venue_status")}
+    return {"phase": s["phase"], "venue_status": s.get("venue_status")}
 
 
 @app.get("/api/session/{sid}/public")
@@ -227,6 +229,27 @@ def session_public(sid: str):
     # Never the vault token / order / signature material.
     payment_mode = mandate.get("payment_mode") if isinstance(mandate, dict) else None
 
+    # Public venue verification summary — status/badge and public links only, so
+    # phones can show the grounding badge without running the pipeline. No secrets.
+    venue_verification = None
+    if plan:
+        pv = plan.get("venue") if isinstance(plan.get("venue"), dict) else {}
+        ver = pv.get("verification") if isinstance(pv, dict) else None
+        if isinstance(ver, dict):
+            venue_verification = {
+                "name": pv.get("name"),
+                "address": pv.get("address"),
+                "verification_status": ver.get("verification_status"),
+                "source_kind": ver.get("source_kind"),
+                "badge": ver.get("badge"),
+                "source_domain": ver.get("source_domain"),
+                "source_url": ver.get("source_url"),
+                "google_maps_uri": ver.get("google_maps_uri"),
+                "google_place_id": ver.get("google_place_id"),
+                "rating": ver.get("rating"),
+                "user_rating_count": ver.get("user_rating_count"),
+            }
+
     return {
         "session_id": s.get("session_id"),
         "name": s.get("name"),
@@ -241,6 +264,8 @@ def session_public(sid: str):
         "booking_ref": plan.get("booking_ref") if plan else None,
         "payment_mode": payment_mode,
         "booking_failed": bool(s.get("booking_failed")),
+        "venue_status": s.get("venue_status"),
+        "venue_verification": venue_verification,
     }
 
 
@@ -339,6 +364,23 @@ def settle_ep(sid: str, body: dict = Body(default={})):
     if has_person_id:
         S.approve_transfer(sid, body["person_id"]) # S13 approve transfer
     return {"ok": True}
+
+
+@app.get("/api/split/{sid}")
+def split(sid: str, mode: str = "itemized"):
+    """Smart itemized meal split for the session (demo-state).
+
+    Orkestr pays the merchant ONCE over x402; this is the internal settlement —
+    each friend's share from what they actually ordered, shared dishes split only
+    among the friends who joined them, service charge + GST allocated fairly.
+    Never triggers a payment. mode = "itemized" (default) or "equal".
+    """
+    _require_session(sid)
+    if mode not in ("itemized", "equal"):
+        raise HTTPException(status_code=400, detail="mode must be 'itemized' or 'equal'")
+    from core.meal_split import demo_meal_split
+
+    return demo_meal_split(mode=mode)
 
 
 @app.post("/api/discovery/venues")

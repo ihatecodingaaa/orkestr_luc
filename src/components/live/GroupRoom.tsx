@@ -7,7 +7,9 @@ import { WaitingRoom } from "./WaitingRoom";
 import { AgentTimeline } from "./AgentTimeline";
 import { FinalPlanCard } from "./FinalPlanCard";
 import { PaymentProofCard } from "./PaymentProofCard";
-import { SettlementCard } from "./SettlementCard";
+import { SmartSplitCard } from "./SmartSplitCard";
+import { TrustPanel } from "./TrustPanel";
+import { NoVerifiedVenueCard } from "./verification";
 import { DemoControls } from "./DemoControls";
 import type { DemoFriend, DemoSection } from "./DemoControls";
 import { InvitePanel } from "./InvitePanel";
@@ -37,7 +39,8 @@ import {
   submitConstraints,
 } from "@/lib/orkestr-api";
 import type { Constraints, LiveState, Member, PublicMember } from "@/lib/orkestr-api";
-import { usePublicSession } from "@/lib/useRoom";
+import type { SplitMode } from "@/lib/split";
+import { usePublicSession, useSplit } from "@/lib/useRoom";
 import s from "./live.module.css";
 
 const PERSONA_MEMBERS: Member[] = PERSONAS.map((p) => ({ id: p.id, name: p.name }));
@@ -220,6 +223,8 @@ export function GroupRoom({
   const [activity, setActivity] = useState<ActivityItem[]>(seedActivity);
   const [busy, setBusy] = useState(false);
   const [autoRunning, setAutoRunning] = useState(false);
+  // Presenter split control — itemized by default (the whole point of Part 2).
+  const [splitMode, setSplitMode] = useState<SplitMode>("itemized");
 
   const submittedRef = useRef<Set<string>>(new Set());
   const startedRef = useRef(false);
@@ -552,7 +557,17 @@ export function GroupRoom({
   }, [stage, isLive]);
 
   const finalPlan = state?.plan ?? DEMO_PLAN;
-  const perPerson = typeof finalPlan.per_person === "number" ? finalPlan.per_person : 80;
+  // Backend is the source of truth when the live pipeline is on and a real
+  // backend session exists; otherwise the local TS calculator (offline/demo).
+  // A local-only room has no backend record, so we never ask /api/split for it.
+  const splitLive = ENABLE_LIVE_PIPELINE && isLive && Boolean(sessionId) && !localRoom;
+  const {
+    split,
+    source: splitSource,
+    fellBack: splitFellBack,
+  } = useSplit(sessionId, splitMode, { enabled: splitLive });
+  // Strict grounding returned no real venue — show the safe empty state, never a fake.
+  const noVenue = isLive && state?.venueStatus === "no_verified_venue";
 
   const realX402 =
     paymentMode(state?.handshake?.mandate) === "x402_real" || pub.data?.payment_mode === "x402_real";
@@ -691,9 +706,26 @@ export function GroupRoom({
 
           {stage === "final" ? (
             <div className={s.finalStack}>
-              <FinalPlanCard plan={finalPlan} members={roomMembers} />
-              <PaymentProofCard />
-              <SettlementCard perPerson={perPerson} members={roomMembers} />
+              {noVenue ? (
+                <NoVerifiedVenueCard />
+              ) : (
+                <>
+                  <FinalPlanCard plan={finalPlan} members={roomMembers} />
+                  <TrustPanel
+                    verification={finalPlan.venue?.verification}
+                    split={split}
+                    venueName={finalPlan.venue?.name}
+                  />
+                  <PaymentProofCard />
+                  <SmartSplitCard
+                    split={split}
+                    mode={splitMode}
+                    onModeChange={setSplitMode}
+                    source={splitSource}
+                    showFallbackNote={splitFellBack}
+                  />
+                </>
+              )}
             </div>
           ) : null}
         </section>

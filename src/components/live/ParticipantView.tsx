@@ -5,7 +5,7 @@ import { Avatar, StatusPill, Wordmark } from "./primitives";
 import { AgentTimeline } from "./AgentTimeline";
 import { FinalPlanCard } from "./FinalPlanCard";
 import { PaymentProofCard } from "./PaymentProofCard";
-import { SettlementCard } from "./SettlementCard";
+import { ParticipantSplitCard } from "./ParticipantSplitCard";
 import {
   COPY,
   DAY_OPTIONS,
@@ -20,8 +20,10 @@ import {
 } from "@/lib/demo";
 import { markReady, submitConstraints } from "@/lib/orkestr-api";
 import type { Constraints, Member } from "@/lib/orkestr-api";
-import { usePublicSession } from "@/lib/useRoom";
+import { usePublicSession, useSplit } from "@/lib/useRoom";
 import s from "./live.module.css";
+
+const ENABLE_LIVE_PIPELINE = process.env.NEXT_PUBLIC_ENABLE_LIVE_PIPELINE === "true";
 
 function toggle(list: string[], value: string): string[] {
   return list.includes(value) ? list.filter((x) => x !== value) : [...list, value];
@@ -35,6 +37,12 @@ export function ParticipantView({ roomId, memberId }: { roomId: string; memberId
   const persona = personaById(memberId);
   const myName = persona?.name ?? memberId;
   const me: Member = useMemo(() => ({ id: memberId, name: myName }), [memberId, myName]);
+  // Your share uses the backend split when the live pipeline is on and this room
+  // is a real backend session; otherwise the local calculator. No scary warnings
+  // on a participant's phone — just the numbers and a subtle source badge.
+  const { split: mySplit, source: splitSource } = useSplit(roomId, "itemized", {
+    enabled: ENABLE_LIVE_PIPELINE && Boolean(roomId),
+  });
 
   // Prefill with this friend's sensible defaults so "Send to my agent" is a
   // single tap during a fast demo — still fully editable.
@@ -301,7 +309,12 @@ export function ParticipantView({ roomId, memberId }: { roomId: string; memberId
         <section className={s.phoneStage} aria-label="Your plan">
           <FinalPlanCard plan={DEMO_PLAN} members={roster} />
           <PaymentProofCard />
-          <SettlementCard perPerson={DEMO_PLAN.per_person ?? 80} members={roster} />
+          <ParticipantSplitCard
+            split={mySplit}
+            memberId={memberId}
+            myName={myName}
+            source={splitSource}
+          />
         </section>
       ) : null}
 
