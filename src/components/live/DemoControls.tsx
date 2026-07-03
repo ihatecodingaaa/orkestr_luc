@@ -24,20 +24,29 @@ export type DemoSection = {
   actions: DemoAction[];
 };
 
-// Presenter-only "Demo Cast" — runs the whole five-friend story from one laptop.
-// Styled as a polished presenter mode, never raw dev tools. Collapsible.
+// Presenter-only cast controls — runs the whole five-friend story from one laptop.
+// Styled as a polished presenter mode, never raw dev tools. Collapsible. Copy is
+// mode-aware: "Demo Cast" in Demo Mode, "Presenter tools · Simulation only" in Live.
 export function DemoControls({
   friends,
   autoRun,
   sections,
   busy,
   autoRunning,
+  title = "Demo Cast",
+  subtitle = "Running solo? Simulate friends joining from their phones.",
+  toggleLabel = "Demo Cast",
+  simulationOnly = false,
 }: {
   friends: DemoFriend[];
   autoRun: DemoAction;
   sections: DemoSection[];
   busy?: boolean;
   autoRunning?: boolean;
+  title?: string;
+  subtitle?: string;
+  toggleLabel?: string;
+  simulationOnly?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const allIn = friends.length > 0 && friends.every((f) => f.ready);
@@ -48,10 +57,11 @@ export function DemoControls({
         <div className={s.demoPanel} role="dialog" aria-label="Demo Cast presenter controls">
           <div className={s.demoPanelHead}>
             <div>
-              <span className={s.demoPanelTitle}>Demo Cast</span>
-              <span className={s.demoPanelSub}>
-                Running solo? Simulate friends joining from their phones.
+              <span className={s.demoPanelTitle}>
+                {title}
+                {simulationOnly ? <span className={s.demoSimTag}>Simulation only</span> : null}
               </span>
+              <span className={s.demoPanelSub}>{subtitle}</span>
             </div>
             <button
               type="button"
@@ -121,7 +131,7 @@ export function DemoControls({
         aria-expanded={open}
       >
         <span className={s.demoToggleDot} aria-hidden />
-        {open ? "Hide Demo Cast" : "Demo Cast"}
+        {open ? `Hide ${toggleLabel}` : toggleLabel}
       </button>
     </div>
   );

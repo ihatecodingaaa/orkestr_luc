@@ -262,6 +262,7 @@ def session_public(sid: str):
     # Public venue verification summary — status/badge and public links only, so
     # phones can show the grounding badge without running the pipeline. No secrets.
     venue_verification = None
+    plan_summary = None
     if plan:
         pv = plan.get("venue") if isinstance(plan.get("venue"), dict) else {}
         ver = pv.get("verification") if isinstance(pv, dict) else None
@@ -276,9 +277,31 @@ def session_public(sid: str):
                 "source_url": ver.get("source_url"),
                 "google_maps_uri": ver.get("google_maps_uri"),
                 "google_place_id": ver.get("google_place_id"),
+                "website_uri": ver.get("website_uri"),
                 "rating": ver.get("rating"),
                 "user_rating_count": ver.get("user_rating_count"),
             }
+        # Compact, public plan summary so a phone (participant) can render the REAL
+        # chosen plan without calling /api/plan (which would lazily run the
+        # pipeline). Read-only projection of the already-computed plan — public
+        # fields only (day/time/price/booking + the venue block already summarised
+        # above). No vault token, order, signature, or any secret is included.
+        plan_summary = {
+            "title": plan.get("title"),
+            "day": plan.get("day"),
+            "time": plan.get("time"),
+            "per_person": plan.get("per_person"),
+            "total_cost": plan.get("total_cost"),
+            "booking_ref": plan.get("booking_ref"),
+            "satisfies": plan.get("satisfies") or [],
+            "venue": {
+                "name": pv.get("name"),
+                "address": pv.get("address"),
+                "area": pv.get("area"),
+                "tags": pv.get("tags") or [],
+                "verification": venue_verification,
+            } if isinstance(pv, dict) else None,
+        }
 
     return {
         "session_id": s.get("session_id"),
@@ -296,6 +319,7 @@ def session_public(sid: str):
         "booking_failed": bool(s.get("booking_failed")),
         "venue_status": s.get("venue_status"),
         "venue_verification": venue_verification,
+        "plan": plan_summary,
     }
 
 

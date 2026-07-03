@@ -105,11 +105,13 @@ export function InvitePanel({
   members,
   readyIds,
   localRoom = false,
+  liveMode = false,
 }: {
   roomId: string | null;
   members: Member[];
   readyIds: string[];
   localRoom?: boolean;
+  liveMode?: boolean;
 }) {
   const origin = useOrigin();
   // Only reached in the brief window before a room id exists. Never a dead-end:
@@ -139,9 +141,12 @@ export function InvitePanel({
           <h3 className={s.inviteTitle}>Invite friends</h3>
           <span className={s.inviteSub}>
             Each friend opens their own link on their phone. Scan the code, or tap “Open as” to
-            demo from this device.
+            open from this device.
           </span>
-          {localRoom ? (
+          <span className={s.inviteGuest}>
+            Friends join as guests — no account, no wallet, no app install.
+          </span>
+          {localRoom && !liveMode ? (
             <span className={s.inviteHint}>
               Live sync is warming up. Demo links still work locally.
             </span>

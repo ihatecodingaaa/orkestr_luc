@@ -17,11 +17,13 @@ export function TrustPanel({
   split,
   venueName,
   receipt = SAVED_RECEIPT,
+  awaitingFreshProof = false,
 }: {
   verification?: VenueVerification;
   split?: MealSplit;
   venueName?: string;
   receipt?: X402Receipt;
+  awaitingFreshProof?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const status = verification?.verification_status ?? "unverified";
@@ -35,6 +37,17 @@ export function TrustPanel({
 
   const reconciles = split ? split.totals_reconcile : true;
 
+  // Honest merchant-adapter label — never claims the restaurant "accepted" via an
+  // agent unless it is the clearly-labelled sandbox agent.
+  const adapterLine =
+    status === "verified"
+      ? "Google Places–verified place data with a booking handoff (Maps / venue)."
+      : status === "source_only"
+        ? "Real web source with a booking handoff link."
+        : status === "demo"
+          ? "Sample venue data (demo) — booking handoff only, no agent claim."
+          : "Booking handoff; sandbox merchant agent shown only as a future rail.";
+
   return (
     <div className={s.howto}>
       <button
@@ -43,7 +56,7 @@ export function TrustPanel({
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
       >
-        <span className={s.howtoTitle}>Why judges can trust this result</span>
+        <span className={s.howtoTitle}>Why this is hard to fake</span>
         <span className={s.howtoChevron} aria-hidden>
           {open ? "Hide" : "Show"}
         </span>
@@ -70,6 +83,13 @@ export function TrustPanel({
             </span>
           </div>
           <div className={s.trustRow}>
+            <span className={s.trustLabel}>Merchant adapter</span>
+            <span className={s.trustValue}>
+              {adapterLine} Most restaurants don&apos;t run agents yet — Orkestr verifies the place
+              and prepares a booking handoff today.
+            </span>
+          </div>
+          <div className={s.trustRow}>
             <span className={s.trustLabel}>Payment</span>
             <span className={s.trustValue}>
               {receipt.isFresh ? (
@@ -81,6 +101,15 @@ export function TrustPanel({
                   </a>
                   {" "}— open Basescan for the live timestamp; friends split internally (no new
                   payment).
+                </>
+              ) : awaitingFreshProof ? (
+                <>
+                  Fresh x402 payment not run yet — the presenter can settle a live 0.001 USDC
+                  testnet payment on demand. Saved fallback proof:{" "}
+                  <a href={receipt.basescan} target="_blank" rel="noreferrer" className={s.vLink}>
+                    {shortHash(receipt.txHash, 8, 6)} ↗
+                  </a>
+                  . Friends never connect a wallet; they split internally.
                 </>
               ) : (
                 <>
@@ -94,6 +123,11 @@ export function TrustPanel({
               )}
             </span>
           </div>
+          <p className={s.trustMoat}>
+            General assistants can suggest a restaurant. Orkestr coordinates the whole group —
+            constraints, trade-offs, verified venue evidence, a fair itemized split, and payment
+            proof — in one shareable room.
+          </p>
         </div>
       ) : null}
     </div>
