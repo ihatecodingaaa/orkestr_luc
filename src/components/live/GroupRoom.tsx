@@ -10,6 +10,9 @@ import { PaymentProofCard } from "./PaymentProofCard";
 import { SmartSplitCard } from "./SmartSplitCard";
 import { TrustPanel } from "./TrustPanel";
 import { FreshProofPanel } from "./FreshProofPanel";
+import { MerchantAdapterCard } from "./MerchantAdapterCard";
+import { LiveReadinessPanel } from "./LiveReadinessPanel";
+import { LiveUnavailableCard } from "./LiveUnavailableCard";
 import { NoVerifiedVenueCard } from "./verification";
 import { DemoControls } from "./DemoControls";
 import type { DemoFriend, DemoSection } from "./DemoControls";
@@ -32,6 +35,7 @@ import {
 import type { DemoGroup } from "@/lib/demo";
 import {
   createLiveSession,
+  getDemoReceiptStatus,
   getLatestReceipt,
   getStatus,
   markReady,
@@ -40,13 +44,48 @@ import {
   shortHash,
   submitConstraints,
 } from "@/lib/orkestr-api";
-import type { Constraints, LiveState, Member, PublicMember, X402Receipt } from "@/lib/orkestr-api";
+import type {
+  Constraints,
+  DemoReceiptStatus,
+  LiveState,
+  Member,
+  Plan,
+  PublicMember,
+  VenueVerification,
+  X402Receipt,
+} from "@/lib/orkestr-api";
 import type { SplitMode } from "@/lib/split";
 import { usePublicSession, useSplit } from "@/lib/useRoom";
+import {
+  ENABLE_LIVE_PIPELINE,
+  IS_LIVE_MODE,
+  MODE_COPY,
+  PRESENTER_TOOLS_VISIBLE,
+} from "@/lib/appMode";
 import s from "./live.module.css";
 
 const PERSONA_MEMBERS: Member[] = PERSONAS.map((p) => ({ id: p.id, name: p.name }));
-const ENABLE_LIVE_PIPELINE = process.env.NEXT_PUBLIC_ENABLE_LIVE_PIPELINE === "true";
+
+// A venue may be shown as the final plan in Live Mode only when it is genuinely
+// grounded (Google Places verified or a real web source). Sample/demo/unverified
+// venues are never presented as the live result.
+function isRealVenue(plan?: Plan | null): boolean {
+  const st = plan?.venue?.verification?.verification_status;
+  return st === "verified" || st === "source_only";
+}
+
+function bookingModeLabel(v?: VenueVerification): string {
+  switch (v?.verification_status) {
+    case "verified":
+      return "Real handoff · Google Maps";
+    case "source_only":
+      return "Web source handoff";
+    case "demo":
+      return "Sample (demo only)";
+    default:
+      return "Manual / unverified";
+  }
+}
 
 function seedActivity(): ActivityItem[] {
   return SEED_CHAT.map((c, i) => ({ id: `seed-${i}`, kind: "chat", who: c.who, text: c.text }));
@@ -93,8 +132,8 @@ function SafetyNote({ realX402 }: { realX402: boolean }) {
     <div className={`${s.safety} ${s.safetyOk}`}>
       <span className={s.safetyDot} aria-hidden />
       <div className={s.safetyText}>
-        <strong>Demo-safe payment mode</strong>
-        <span>No live USDC is spent here — the verified x402 receipt is shown as proof.</span>
+        <strong>{MODE_COPY.safetyOkTitle}</strong>
+        <span>{MODE_COPY.safetyOkBody}</span>
       </div>
     </div>
   );
@@ -233,6 +272,13 @@ export function GroupRoom({
   // Defaults to the saved verified fallback; a deliberate presenter "fresh proof"
   // run swaps in the new on-chain receipt. Reading /latest on mount NEVER spends.
   const [receipt, setReceipt] = useState<X402Receipt>(SAVED_RECEIPT);
+  // Live Mode only: when the backend can't be reached we BLOCK with a real error
+  // (LiveUnavailableCard) instead of silently dropping to a local sample room.
+  const [backendDown, setBackendDown] = useState(false);
+  const [retrying, setRetrying] = useState(false);
+  // Public, non-secret fresh-proof status — powers the Live readiness panel and
+  // the "payment not run yet" copy. Reading it NEVER triggers a payment.
+  const [freshStatus, setFreshStatus] = useState<DemoReceiptStatus | null>(null);
 
   const submittedRef = useRef<Set<string>>(new Set());
   const startedRef = useRef(false);
@@ -296,47 +342,74 @@ export function GroupRoom({
 
   // Bind to a shared room id, or create a fresh live session and make the
   // presenter URL shareable so friends' links resolve to the same backend room.
-  useEffect(() => {
-    if (!isLive) return;
-    let active = true;
-    (async () => {
-      if (boundRoomId) {
-        setSessionId(boundRoomId);
-        setMembers(PERSONA_MEMBERS);
-        setForms(memberForms(PERSONA_MEMBERS));
+  // Demo Mode falls back to a local sample room if the backend is unreachable so
+  // the demo never dead-ends. Live Mode does NOT — it blocks with a real error.
+  const bindLiveSession = useCallback(async () => {
+    if (boundRoomId) {
+      setSessionId(boundRoomId);
+      setMembers(PERSONA_MEMBERS);
+      setForms(memberForms(PERSONA_MEMBERS));
+      return;
+    }
+    try {
+      const live = await createLiveSession();
+      const ms = live.members?.length ? live.members : PERSONA_MEMBERS;
+      setSessionId(live.session_id);
+      setMembers(ms);
+      setForms(memberForms(ms));
+      setBackendDown(false);
+      if (typeof window !== "undefined") {
+        window.history.replaceState(null, "", presenterLink(live.session_id));
+      }
+    } catch (e) {
+      console.warn("[orkestr] live room unavailable", e);
+      if (IS_LIVE_MODE) {
+        // Live Mode: block with a real error — never a fake local room.
+        setBackendDown(true);
         return;
       }
-      try {
-        const live = await createLiveSession();
-        if (!active) return;
-        const ms = live.members?.length ? live.members : PERSONA_MEMBERS;
-        setSessionId(live.session_id);
-        setMembers(ms);
-        setForms(memberForms(ms));
-        if (typeof window !== "undefined") {
-          window.history.replaceState(null, "", presenterLink(live.session_id));
-        }
-      } catch (e) {
-        if (!active) return;
-        // Backend unreachable — fall back to a fully local demo room so the
-        // presenter can still run Demo Cast, share invite links, and reach the
-        // reveal. The real error stays in the console; the UI stays calm.
-        console.warn("[orkestr] live room unavailable — running a local demo room", e);
-        const localId = localRoomId();
-        setSessionId(localId);
-        setLocalRoom(true);
-        setMembers(PERSONA_MEMBERS);
-        setForms(memberForms(PERSONA_MEMBERS));
-        setSyncWarn(true);
-        if (typeof window !== "undefined") {
-          window.history.replaceState(null, "", presenterLink(localId));
-        }
+      // Demo Mode: fall back to a fully local demo room so the presenter can
+      // still run Demo Cast, share invite links, and reach the reveal.
+      const localId = localRoomId();
+      setSessionId(localId);
+      setLocalRoom(true);
+      setMembers(PERSONA_MEMBERS);
+      setForms(memberForms(PERSONA_MEMBERS));
+      setSyncWarn(true);
+      if (typeof window !== "undefined") {
+        window.history.replaceState(null, "", presenterLink(localId));
       }
-    })();
-    return () => {
-      active = false;
-    };
-  }, [isLive, boundRoomId]);
+    }
+  }, [boundRoomId]);
+
+  useEffect(() => {
+    if (!isLive) return;
+    // Deferred so the initial setState never runs synchronously in the effect body.
+    const kick = window.setTimeout(() => void bindLiveSession(), 0);
+    return () => window.clearTimeout(kick);
+  }, [isLive, bindLiveSession]);
+
+  // Live Mode: allow the presenter to retry a failed backend connection.
+  const retryLive = useCallback(async () => {
+    setRetrying(true);
+    try {
+      await bindLiveSession();
+      await pub.refresh();
+    } finally {
+      setRetrying(false);
+    }
+  }, [bindLiveSession, pub]);
+
+  // Public fresh-proof status for the Live readiness panel + "not run yet" copy.
+  useEffect(() => {
+    if (!isLive) return;
+    const kick = window.setTimeout(() => {
+      getDemoReceiptStatus()
+        .then(setFreshStatus)
+        .catch(() => setFreshStatus(null));
+    }, 0);
+    return () => window.clearTimeout(kick);
+  }, [isLive]);
 
   // On mount, ask the backend for the latest receipt (read-only — NEVER spends).
   // If a fresh proof already exists this process (e.g. presenter ran it, then
@@ -531,12 +604,19 @@ export function GroupRoom({
       setSessionId(live.session_id);
       setMembers(ms);
       setForms(memberForms(ms));
+      setBackendDown(false);
       if (typeof window !== "undefined") {
         window.history.replaceState(null, "", presenterLink(live.session_id));
       }
     } catch (e) {
-      // Stay usable on a local demo room if the backend is unreachable.
-      console.warn("[orkestr] reset could not reach the backend — using a local demo room", e);
+      console.warn("[orkestr] reset could not reach the backend", e);
+      if (IS_LIVE_MODE) {
+        // Live Mode: block with a real error rather than a fake local room.
+        setBackendDown(true);
+        setBusy(false);
+        return;
+      }
+      // Demo Mode: stay usable on a local demo room.
       const localId = localRoomId();
       setSessionId(localId);
       setLocalRoom(true);
@@ -582,7 +662,14 @@ export function GroupRoom({
     stageRef.current?.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
   }, [stage, isLive]);
 
-  const finalPlan = state?.plan ?? DEMO_PLAN;
+  // The real chosen plan comes from the live pipeline (presenter) or the public
+  // snapshot (both are real backend data). Demo Mode falls back to the sample
+  // plan so the demo always renders; Live Mode NEVER shows the sample as the
+  // result — no real plan means the "no verified restaurant" state instead.
+  const realPlan: Plan | null =
+    state?.plan ?? (pub.data?.plan ? (pub.data.plan as unknown as Plan) : null);
+  const displayPlan: Plan | null = IS_LIVE_MODE ? realPlan : (state?.plan ?? DEMO_PLAN);
+
   // Backend is the source of truth when the live pipeline is on and a real
   // backend session exists; otherwise the local TS calculator (offline/demo).
   // A local-only room has no backend record, so we never ask /api/split for it.
@@ -592,15 +679,31 @@ export function GroupRoom({
     source: splitSource,
     fellBack: splitFellBack,
   } = useSplit(sessionId, splitMode, { enabled: splitLive });
-  // Strict grounding returned no real venue — show the safe empty state, never a fake.
-  const noVenue = isLive && state?.venueStatus === "no_verified_venue";
+
+  // When to show the "no verified restaurant" state instead of a plan:
+  //  • Live Mode: whenever the final plan isn't a genuinely grounded venue.
+  //  • Demo Mode: only when strict grounding explicitly returned no venue.
+  const venueStatus = state?.venueStatus ?? pub.data?.venue_status ?? null;
+  const noVenue = isLive && (
+    IS_LIVE_MODE
+      ? stage === "final" && !isRealVenue(displayPlan)
+      : venueStatus === "no_verified_venue"
+  );
+
+  const planVerification = displayPlan?.venue?.verification;
+  const bookingMode = bookingModeLabel(planVerification);
+  // Live Mode: the saved receipt is NOT the live proof — until a fresh proof is
+  // run, the proof card shows "not run yet" with the saved receipt as secondary.
+  const awaitingFreshProof = IS_LIVE_MODE && !receipt.isFresh;
+  const backendConnected = !backendDown && (Boolean(pub.data) || Boolean(freshStatus));
 
   const realX402 =
     paymentMode(state?.handshake?.mandate) === "x402_real" || pub.data?.payment_mode === "x402_real";
 
-  // Presenter-only, demo-safe notice when backend sync is unavailable (a failed
-  // write or the polling endpoint being unreachable). Never shows raw error text.
-  const showNotice = isLive && (syncWarn || Boolean(pub.error)) && !noticeDismissed;
+  // Demo Mode only: soft notice when backend sync is unavailable (Live Mode uses
+  // the blocking LiveUnavailableCard instead, so this never shows in Live Mode).
+  const showNotice =
+    isLive && !IS_LIVE_MODE && (syncWarn || Boolean(pub.error)) && !noticeDismissed;
 
   // Single source of truth for the status pill, driven by readiness + phase:
   //   0/5–4/5      → "Waiting for friends"
@@ -637,6 +740,21 @@ export function GroupRoom({
     },
   ];
 
+  // Live Mode blocking state: the backend couldn't create/reach the room. Show a
+  // real error with Retry — never a fake sample room. (Demo Mode never blocks.)
+  if (IS_LIVE_MODE && isLive && backendDown) {
+    return (
+      <div className={s.room}>
+        <LiveUnavailableCard
+          onRetry={() => void retryLive()}
+          retrying={retrying}
+          failedEndpoint="/api/session/live"
+          statusText="unreachable"
+        />
+      </div>
+    );
+  }
+
   return (
     <div className={s.room}>
       <GroupRoomHeader
@@ -671,6 +789,7 @@ export function GroupRoom({
           members={roomMembers}
           readyIds={readyIds}
           localRoom={localRoom}
+          liveMode={IS_LIVE_MODE}
         />
       ) : null}
 
@@ -732,18 +851,20 @@ export function GroupRoom({
 
           {stage === "final" ? (
             <div className={s.finalStack}>
-              {noVenue ? (
+              {noVenue || !displayPlan ? (
                 <NoVerifiedVenueCard />
               ) : (
                 <>
-                  <FinalPlanCard plan={finalPlan} members={roomMembers} />
+                  <FinalPlanCard plan={displayPlan} members={roomMembers} />
                   <TrustPanel
-                    verification={finalPlan.venue?.verification}
+                    verification={displayPlan.venue?.verification}
                     split={split}
-                    venueName={finalPlan.venue?.name}
+                    venueName={displayPlan.venue?.name}
                     receipt={receipt}
+                    awaitingFreshProof={awaitingFreshProof}
                   />
-                  <PaymentProofCard receipt={receipt} />
+                  <MerchantAdapterCard verification={displayPlan.venue?.verification} />
+                  <PaymentProofCard receipt={receipt} awaitingFreshProof={awaitingFreshProof} />
                   <SmartSplitCard
                     split={split}
                     mode={splitMode}
@@ -758,13 +879,23 @@ export function GroupRoom({
         </section>
       </div>
 
-      {isLive ? <HowToDemo /> : null}
+      {isLive && PRESENTER_TOOLS_VISIBLE ? <HowToDemo /> : null}
 
-      {isLive ? <WalletLab receipt={receipt} /> : null}
+      {isLive && PRESENTER_TOOLS_VISIBLE ? <WalletLab receipt={receipt} /> : null}
 
-      {isLive ? <FreshProofPanel onFresh={setReceipt} /> : null}
+      {isLive && PRESENTER_TOOLS_VISIBLE ? (
+        <LiveReadinessPanel
+          backendConnected={backendConnected}
+          verification={planVerification}
+          freshStatus={freshStatus}
+          splitSource={splitSource}
+          bookingMode={bookingMode}
+        />
+      ) : null}
 
-      {isLive ? (
+      {isLive && PRESENTER_TOOLS_VISIBLE ? <FreshProofPanel onFresh={setReceipt} /> : null}
+
+      {isLive && PRESENTER_TOOLS_VISIBLE ? (
         <DemoControls
           friends={demoFriends}
           autoRun={{
@@ -775,6 +906,10 @@ export function GroupRoom({
           sections={demoSections}
           busy={busy}
           autoRunning={autoRunning}
+          title={MODE_COPY.presenterToolsTitle}
+          subtitle={MODE_COPY.presenterToolsSub}
+          toggleLabel={MODE_COPY.presenterToolsToggle}
+          simulationOnly={IS_LIVE_MODE}
         />
       ) : null}
     </div>

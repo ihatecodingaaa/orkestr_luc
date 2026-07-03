@@ -6,24 +6,32 @@ import { AgentTimeline } from "./AgentTimeline";
 import { FinalPlanCard } from "./FinalPlanCard";
 import { PaymentProofCard } from "./PaymentProofCard";
 import { ParticipantSplitCard } from "./ParticipantSplitCard";
+import { NoVerifiedVenueCard } from "./verification";
 import {
   COPY,
   DAY_OPTIONS,
   DEMO_PLAN,
   DIET_OPTIONS,
   PERSONAS,
+  SAVED_RECEIPT,
   TIMELINE_STEPS,
   cloneDemoConstraints,
   formatNames,
   isReadyToSubmit,
   personaById,
 } from "@/lib/demo";
-import { markReady, submitConstraints } from "@/lib/orkestr-api";
-import type { Constraints, Member } from "@/lib/orkestr-api";
+import { getLatestReceipt, markReady, submitConstraints } from "@/lib/orkestr-api";
+import type { Constraints, Member, Plan, X402Receipt } from "@/lib/orkestr-api";
 import { usePublicSession, useSplit } from "@/lib/useRoom";
+import { ENABLE_LIVE_PIPELINE, IS_LIVE_MODE } from "@/lib/appMode";
 import s from "./live.module.css";
 
-const ENABLE_LIVE_PIPELINE = process.env.NEXT_PUBLIC_ENABLE_LIVE_PIPELINE === "true";
+// A venue may be shown as the participant's plan in Live Mode only when it is
+// genuinely grounded (Google Places verified or a real web source).
+function isRealVenue(plan?: Plan | null): boolean {
+  const st = plan?.venue?.verification?.verification_status;
+  return st === "verified" || st === "source_only";
+}
 
 function toggle(list: string[], value: string): string[] {
   return list.includes(value) ? list.filter((x) => x !== value) : [...list, value];
@@ -54,9 +62,31 @@ export function ParticipantView({ roomId, memberId }: { roomId: string; memberId
   const [revealed, setRevealed] = useState(false);
   const [working, setWorking] = useState(false);
   const [timelineStep, setTimelineStep] = useState(0);
+  // Active x402 receipt. Participants NEVER trigger a payment — this is read-only.
+  // In Live Mode we ask /latest (safe) so if the presenter ran a fresh proof, the
+  // phone shows the fresh receipt; otherwise it shows "not run yet".
+  const [receipt, setReceipt] = useState<X402Receipt>(SAVED_RECEIPT);
 
   const { data } = usePublicSession(roomId, { intervalMs: 2200 });
   const startedRef = useRef(false);
+
+  useEffect(() => {
+    if (!IS_LIVE_MODE) return;
+    let active = true;
+    const kick = window.setTimeout(() => {
+      getLatestReceipt()
+        .then((r) => {
+          if (active && r) setReceipt(r);
+        })
+        .catch(() => {
+          /* backend offline — keep the saved fallback receipt */
+        });
+    }, 0);
+    return () => {
+      active = false;
+      window.clearTimeout(kick);
+    };
+  }, []);
 
   const roomName = data?.name ?? "Friday Dinner Crew";
   const total = data?.members_total || 5;
@@ -122,6 +152,13 @@ export function ParticipantView({ roomId, memberId }: { roomId: string; memberId
 
   const dietLabels = form.dietary.map((id) => DIET_OPTIONS.find((d) => d.id === id)?.label ?? id);
 
+  // Live Mode shows the REAL plan from the public snapshot (never the sample
+  // venue); Demo Mode keeps the sample so the phone always renders a plan.
+  const realPlan: Plan | null = data?.plan ? (data.plan as unknown as Plan) : null;
+  const displayPlan: Plan | null = IS_LIVE_MODE ? realPlan : DEMO_PLAN;
+  const noVenue = IS_LIVE_MODE && !isRealVenue(displayPlan);
+  const awaitingFreshProof = IS_LIVE_MODE && !receipt.isFresh;
+
   return (
     <div className={s.phone}>
       <header className={s.phoneTop}>
@@ -158,6 +195,10 @@ export function ParticipantView({ roomId, memberId }: { roomId: string; memberId
           <h2 className={s.phoneCardTitle}>What works for you?</h2>
           <p className={s.phoneCardSub}>
             Your agent takes it from here — no group chat back-and-forth.
+          </p>
+          <p className={s.phoneGuestNote}>
+            You&apos;re in as a guest — no account, no wallet, no app install. Orkestr pays the
+            venue once through its agent wallet; you just split your share.
           </p>
 
           <div className={s.field}>
@@ -307,14 +348,20 @@ export function ParticipantView({ roomId, memberId }: { roomId: string; memberId
 
       {stage === "final" ? (
         <section className={s.phoneStage} aria-label="Your plan">
-          <FinalPlanCard plan={DEMO_PLAN} members={roster} />
-          <PaymentProofCard />
-          <ParticipantSplitCard
-            split={mySplit}
-            memberId={memberId}
-            myName={myName}
-            source={splitSource}
-          />
+          {noVenue || !displayPlan ? (
+            <NoVerifiedVenueCard />
+          ) : (
+            <>
+              <FinalPlanCard plan={displayPlan} members={roster} />
+              <PaymentProofCard receipt={receipt} awaitingFreshProof={awaitingFreshProof} />
+              <ParticipantSplitCard
+                split={mySplit}
+                memberId={memberId}
+                myName={myName}
+                source={splitSource}
+              />
+            </>
+          )}
         </section>
       ) : null}
 

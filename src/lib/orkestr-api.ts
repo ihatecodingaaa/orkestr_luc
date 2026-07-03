@@ -135,6 +135,26 @@ export type PublicMember = {
   freeform: string;
 };
 
+// Compact, public projection of the chosen plan (from GET /api/session/{sid}/public).
+// Lets a phone render the REAL plan without calling /api/plan (which would lazily
+// run the pipeline). Public fields only — no vault token / order / signature.
+export type PublicPlan = {
+  title?: string | null;
+  day?: string | null;
+  time?: string | null;
+  per_person?: number | null;
+  total_cost?: number | null;
+  booking_ref?: string | null;
+  satisfies?: string[];
+  venue?: {
+    name?: string | null;
+    address?: string | null;
+    area?: string | null;
+    tags?: string[];
+    verification?: (VenueVerification & { name?: string; address?: string }) | null;
+  } | null;
+};
+
 export type PublicSession = {
   session_id: string;
   name?: string;
@@ -151,6 +171,7 @@ export type PublicSession = {
   booking_failed: boolean;
   venue_status?: string | null;
   venue_verification?: (VenueVerification & { name?: string; address?: string }) | null;
+  plan?: PublicPlan | null;
 };
 
 export type LiveState = {
