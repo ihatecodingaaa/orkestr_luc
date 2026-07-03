@@ -2,8 +2,9 @@
 
 import { useState } from "react";
 import { CopyButton, Fact, StatusPill } from "./primitives";
-import { COPY, X402_PROOF } from "@/lib/demo";
+import { COPY, SAVED_RECEIPT, X402_PROOF } from "@/lib/demo";
 import { shortHash } from "@/lib/orkestr-api";
+import type { X402Receipt } from "@/lib/orkestr-api";
 import s from "./live.module.css";
 
 function WalletNode({
@@ -28,42 +29,55 @@ function WalletNode({
 
 // The WOW card, styled as a premium receipt. First glance stays human — what was
 // paid, from whom to whom, and the tx you can verify. The protocol-level detail
-// (asset address, network id, base units, verification steps) is tucked into a
-// collapsible so it never reads like a blockchain explorer.
-export function PaymentProofCard() {
-  const p = X402_PROOF;
+// is tucked into a collapsible so it never reads like a blockchain explorer.
+//
+// `receipt` defaults to the saved verified fallback. When the presenter runs a
+// fresh proof, the parent passes the fresh receipt in and the card clearly
+// relabels itself ("Fresh x402 testnet receipt" + a "Fresh proof" badge) and
+// swaps to the new tx hash / Basescan link — never pretending the saved receipt
+// happened "just now".
+export function PaymentProofCard({ receipt = SAVED_RECEIPT }: { receipt?: X402Receipt }) {
   const [showTech, setShowTech] = useState(false);
+  const fresh = receipt.isFresh;
+
+  const kicker = fresh ? "Fresh x402 testnet receipt" : "Saved verified receipt";
+  const tag = fresh
+    ? "Fresh receipt created just now. Open Basescan for the exact on-chain timestamp."
+    : "Previously settled on Base Sepolia. This screen does not create a new payment.";
 
   return (
     <div className={s.proofCard}>
       <div className={s.proofHead}>
         <div>
-          <span className={s.proofKicker}>Verified payment receipt</span>
-          <h2 className={s.proofTitle}>{p.amount} paid on Base</h2>
+          <span className={s.proofKicker}>{kicker}</span>
+          <h2 className={s.proofTitle}>{receipt.amount} paid on Base</h2>
         </div>
-        <StatusPill kind="paid">{p.status}</StatusPill>
+        <div className={s.proofHeadPills}>
+          {fresh ? <span className={s.freshBadge}>Fresh proof</span> : null}
+          <StatusPill kind="paid">Paid</StatusPill>
+        </div>
       </div>
 
       <div className={s.proofFlow}>
-        <WalletNode label="Orkestr Agent Wallet" addr={p.buyer} role="buyer" />
+        <WalletNode label="Orkestr Agent Wallet" addr={receipt.buyer} role="buyer" />
         <div className={s.proofArrow}>
-          <span className={s.proofArrowAmt}>{p.amount}</span>
+          <span className={s.proofArrowAmt}>{receipt.amount}</span>
           <span className={s.proofArrowLine} aria-hidden>
             <span className={s.proofArrowCap}>→</span>
           </span>
           <span className={s.proofArrowSub}>paid once</span>
         </div>
-        <WalletNode label="Merchant Wallet" addr={p.merchant} role="merchant" />
+        <WalletNode label="Merchant Wallet" addr={receipt.merchant} role="merchant" />
       </div>
 
       <div className={s.proofTx}>
         <div className={s.proofTxRow}>
           <span className={s.proofTxLabel}>Transaction</span>
-          <code className={s.proofTxHash}>{shortHash(p.txHash, 12, 10)}</code>
+          <code className={s.proofTxHash}>{shortHash(receipt.txHash, 12, 10)}</code>
         </div>
         <div className={s.proofTxActions}>
-          <CopyButton value={p.txHash} label="Copy tx hash" />
-          <a className={s.proofLink} href={p.basescan} target="_blank" rel="noreferrer">
+          <CopyButton value={receipt.txHash} label="Copy tx hash" />
+          <a className={s.proofLink} href={receipt.basescan} target="_blank" rel="noreferrer">
             View on Basescan ↗
           </a>
         </div>
@@ -84,7 +98,7 @@ export function PaymentProofCard() {
         {showTech ? (
           <div className={s.proofTechBody}>
             <ul className={s.proofChecks}>
-              {p.verified.map((v) => (
+              {X402_PROOF.verified.map((v) => (
                 <li key={v}>
                   <span className={s.proofCheckMark} aria-hidden>
                     ✓
@@ -94,21 +108,19 @@ export function PaymentProofCard() {
               ))}
             </ul>
             <div className={s.proofFacts}>
-              <Fact label="Payment mode" value={p.paymentMode} />
-              <Fact label="Amount" value={`${p.amount} (${p.amountBaseUnits} base units)`} />
-              <Fact label="Asset" value={p.asset} />
-              <Fact label="Network" value={p.networkId} />
-              <Fact label="Chain" value={p.network} />
-              <Fact label="Protocol" value={p.protocol} />
+              <Fact label="Payment mode" value={receipt.paymentMode} />
+              <Fact label="Amount" value={`${receipt.amount} (${receipt.amountBaseUnits} base units)`} />
+              <Fact label="Asset" value={receipt.asset} />
+              <Fact label="Network" value={receipt.networkId} />
+              <Fact label="Chain" value={receipt.network} />
+              <Fact label="Receipt" value={fresh ? "Fresh demo receipt" : "Saved verified receipt"} />
             </div>
           </div>
         ) : null}
       </div>
 
       <p className={s.proofNote}>{COPY.walletExplainer}</p>
-      <span className={s.demoTag}>
-        Verified demo receipt — this screen never starts a new payment.
-      </span>
+      <span className={s.demoTag}>{tag}</span>
     </div>
   );
 }

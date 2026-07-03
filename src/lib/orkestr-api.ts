@@ -163,6 +163,76 @@ export type LiveState = {
   checkedAt: string;
 };
 
+// ---- x402 demo receipt (presenter-only fresh proof) -----------------------
+// The receipt the UI renders — either the saved verified fallback or a fresh
+// on-chain proof created by the presenter. All fields are public chain data.
+export type ReceiptSource = "fresh_demo_receipt" | "saved_verified_receipt";
+
+export type X402Receipt = {
+  source: ReceiptSource;
+  isFresh: boolean;
+  label: string;
+  paymentMode: string;
+  amount: string; // display, e.g. "0.001 USDC"
+  amountBaseUnits: string; // "1000"
+  network: string; // display chain, e.g. "Base Sepolia"
+  networkId: string; // e.g. "eip155:84532"
+  asset: string;
+  buyer: string;
+  merchant: string;
+  txHash: string;
+  basescan: string;
+  createdAt?: string | null;
+};
+
+// Public-safe status for the presenter's "Fresh x402 proof run" panel. Reading
+// this NEVER triggers a payment — it only tells the UI whether the button is
+// enabled and how long any cooldown has left.
+export type DemoReceiptStatus = {
+  enabled: boolean;
+  cooldown_seconds: number;
+  cooldown_remaining_seconds: number;
+  in_progress?: boolean;
+  amount: number;
+  amount_display: string;
+  network: string;
+  asset?: string | null;
+  merchant?: string | null;
+  confirm_phrase?: string;
+  has_latest_fresh_receipt: boolean;
+};
+
+// Map a backend receipt JSON (from /latest or a successful /run) to X402Receipt.
+// Defensive: unknown/partial payloads fall back to safe display defaults.
+export function toReceipt(raw: unknown): X402Receipt | null {
+  if (!isRecord(raw)) return null;
+  const txHash = asString(raw.txHash);
+  const source: ReceiptSource =
+    asString(raw.source) === "fresh_demo_receipt" ? "fresh_demo_receipt" : "saved_verified_receipt";
+  return {
+    source,
+    isFresh: source === "fresh_demo_receipt",
+    label: asString(
+      raw.label,
+      source === "fresh_demo_receipt" ? "Fresh x402 testnet receipt" : "Saved verified receipt",
+    ),
+    paymentMode: asString(raw.payment_mode, "x402_real"),
+    amount: asString(raw.amount_display, "0.001 USDC"),
+    amountBaseUnits: String(raw.amount ?? "1000"),
+    network: asString(raw.chain, "Base Sepolia"),
+    networkId: asString(raw.network, "eip155:84532"),
+    asset: asString(raw.asset),
+    buyer: asString(raw.buyer),
+    merchant: asString(raw.merchant),
+    txHash,
+    basescan: asString(
+      raw.blockExplorerUrl,
+      txHash ? `https://sepolia.basescan.org/tx/${txHash}` : "",
+    ),
+    createdAt: typeof raw.created_at === "string" ? raw.created_at : null,
+  };
+}
+
 async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     cache: "no-store",
@@ -272,6 +342,63 @@ export async function getSplit(
   } finally {
     clearTimeout(timer);
   }
+}
+
+// ---- x402 demo receipt client ---------------------------------------------
+// All three calls are read-only EXCEPT runDemoReceipt, which is the ONLY thing
+// in the whole frontend that can start a real payment — and only when the
+// presenter deliberately supplies the secret + exact confirm phrase.
+
+// Read-only: never triggers a payment. Safe to call on mount / poll for cooldown.
+export async function getDemoReceiptStatus(timeoutMs = 6000): Promise<DemoReceiptStatus> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetchJson<DemoReceiptStatus>("/api/x402/demo-receipt/status", {
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Read-only: returns the latest fresh receipt if one exists, else the saved
+// verified fallback. Never triggers a payment.
+export async function getLatestReceipt(timeoutMs = 6000): Promise<X402Receipt | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const raw = await fetchJson<Dict>("/api/x402/demo-receipt/latest", {
+      signal: controller.signal,
+    });
+    return toReceipt(raw);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export type RunReceiptResult = { ok: boolean; status: number; body: Dict };
+
+// The deliberate presenter action. The secret is sent ONLY in the request header
+// (never the URL, never persisted, never logged). Returns the HTTP status so the
+// caller can distinguish 403 / 400 / 409 / 429 / 502 without throwing.
+export async function runDemoReceipt(secret: string, confirm: string): Promise<RunReceiptResult> {
+  const response = await fetch(`${API_BASE}/api/x402/demo-receipt/run`, {
+    method: "POST",
+    cache: "no-store",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Orkestr-Demo-Secret": secret,
+    },
+    body: JSON.stringify({ confirm }),
+  });
+  let body: Dict = {};
+  try {
+    body = (await response.json()) as Dict;
+  } catch {
+    body = {};
+  }
+  return { ok: response.ok, status: response.status, body };
 }
 
 // ---- small pure helpers ---------------------------------------------------
