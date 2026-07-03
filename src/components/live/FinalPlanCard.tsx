@@ -1,4 +1,5 @@
 import { Avatar, Fact, StatusPill } from "./primitives";
+import { VenueBadge, VenueEvidence } from "./verification";
 import { WHY_THIS_WON } from "@/lib/demo";
 import { money } from "@/lib/orkestr-api";
 import type { Member, Plan } from "@/lib/orkestr-api";
@@ -32,6 +33,7 @@ export function FinalPlanCard({ plan, members }: { plan: Plan; members: Member[]
   const happyIds = satisfies.length ? satisfies : members.map((m) => m.id);
   const seats = members.length || 5;
   const reasons = buildReasons(plan);
+  const verification = plan.venue?.verification;
 
   return (
     <div className={s.planCard}>
@@ -39,10 +41,17 @@ export function FinalPlanCard({ plan, members }: { plan: Plan; members: Member[]
         <div>
           <span className={s.stageKicker}>The plan</span>
           <h2 className={s.planVenue}>{plan.venue?.name ?? plan.title ?? "Dinner"}</h2>
-          <p className={s.planAddr}>{plan.venue?.address ?? "Singapore"}</p>
+          <p className={s.planAddr}>
+            {plan.venue?.address ?? plan.venue?.area ?? "Singapore"}
+          </p>
         </div>
-        <StatusPill kind="done">Booked</StatusPill>
+        <div className={s.planHeadRight}>
+          <StatusPill kind="done">Booked</StatusPill>
+          <VenueBadge verification={verification} />
+        </div>
       </div>
+
+      <VenueEvidence verification={verification} />
 
       <div className={s.planFacts}>
         <Fact label="When" value={`${plan.day ?? "FRI"} · ${plan.time ?? "19:30"}`} />

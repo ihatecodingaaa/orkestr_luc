@@ -3,6 +3,8 @@
 // No secrets here. Status reads can run backend planning/booking depending on
 // server config, so the UI keeps that pipeline behind an explicit opt-in flag.
 
+import type { MealSplit, SplitMode } from "@/lib/split";
+
 export const API_BASE = "/orkestr-api";
 
 export type Dict = Record<string, unknown>;
@@ -16,11 +18,37 @@ export type Constraints = {
   freeform: string;
 };
 
+export type VerificationStatus = "verified" | "source_only" | "demo" | "unverified";
+
+// Grounding metadata attached to the chosen venue. Mirrors the backend
+// verification block (agents/venue_grounding.py). No secrets — public links only.
+export type VenueVerification = {
+  verification_status?: VerificationStatus;
+  source_kind?: "google_places" | "exa" | "demo" | "unverified";
+  verification_notes?: string;
+  confidence_score?: number;
+  badge?: string;
+  area?: string | null;
+  cuisine?: string | null;
+  price_hint?: string | null;
+  source_url?: string | null;
+  source_title?: string | null;
+  source_domain?: string | null;
+  google_place_id?: string | null;
+  google_maps_uri?: string | null;
+  website_uri?: string | null;
+  business_status?: string | null;
+  rating?: number | null;
+  user_rating_count?: number | null;
+};
+
 export type Venue = {
   id?: string;
   name?: string;
   address?: string;
+  area?: string;
   tags?: string[];
+  verification?: VenueVerification;
 };
 
 export type Conflict = {
@@ -88,6 +116,7 @@ export type StatusResponse = {
   members_total?: number;
   booking_failed?: boolean;
   fail_reason?: string | null;
+  venue_status?: string | null;
 };
 
 // Read-only public snapshot used for cross-device sync (presenter ↔ phones).
@@ -120,6 +149,8 @@ export type PublicSession = {
   booking_ref?: string | null;
   payment_mode?: string | null;
   booking_failed: boolean;
+  venue_status?: string | null;
+  venue_verification?: (VenueVerification & { name?: string; address?: string }) | null;
 };
 
 export type LiveState = {
@@ -128,6 +159,7 @@ export type LiveState = {
   negotiation: Message[];
   handshake: Handshake;
   settlement: Settlement;
+  venueStatus?: string | null;
   checkedAt: string;
 };
 
@@ -214,11 +246,32 @@ export async function readLiveState(sessionId: string): Promise<LiveState> {
     negotiation: Array.isArray(negotiation) ? negotiation : [],
     handshake,
     settlement,
+    venueStatus: status.venue_status ?? null,
     checkedAt: new Date().toLocaleTimeString([], {
       hour: "2-digit",
       minute: "2-digit",
     }),
   };
+}
+
+// Smart itemized split for a session, computed by the backend. This endpoint is
+// calculation-only: it never triggers planning, Exa, Places, ACP, x402, signing,
+// settlement, or a payment. Aborts after timeoutMs so a slow/offline backend can
+// fall back to the local TS calculator instead of hanging the demo.
+export async function getSplit(
+  sessionId: string,
+  mode: SplitMode = "itemized",
+  timeoutMs = 6000,
+): Promise<MealSplit> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetchJson<MealSplit>(`/api/split/${sessionId}?mode=${mode}`, {
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // ---- small pure helpers ---------------------------------------------------

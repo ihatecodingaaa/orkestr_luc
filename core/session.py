@@ -117,27 +117,76 @@ def add_constraints(sid, person):
     return s
 
 
+def _no_verified_venue(s):
+    """Safe no-result state when strict grounding finds no real restaurant.
+
+    Fails closed instead of showing a fake or sample venue as a real one.
+    """
+    from agents.venue_grounding import NO_VERIFIED_VENUE_MESSAGE
+
+    s["plan"] = None
+    s["handshake"] = None
+    s["negotiation"] = s.get("negotiation") or []
+    s["booking_failed"] = True
+    s["venue_status"] = "no_verified_venue"
+    s["plan_ready"] = False
+    s["fail_reason"] = NO_VERIFIED_VENUE_MESSAGE
+    s["phase"] = "failed"
+    return s
+
+
 def compute_plan(sid):
     """Negotiation -> plan -> venue handshake. Moves phase to plan_ready."""
     if sid not in SESSIONS:
         raise HTTPException(status_code=404, detail="session not found")
     s = SESSIONS[sid]
     members = _members(s)
-    venues = _load("venues.json")
-    # Exa planning supplement: only for non-ORK sessions when both flags are on.
-    # Any Exa failure silently falls back to seeded venues only.
-    if sid != "ORK-001":
+    seed_venues = _load("venues.json")
+
+    from agents.venue_grounding import (
+        attach_grounding, build_grounding_index, check_final_venue,
+        filter_pool_for_strict, is_strict_real_venues, venue_status_label,
+    )
+
+    # ORK-001 stays frozen: seeded venues only, no discovery, no strict gate.
+    if sid == "ORK-001":
+        venues = seed_venues
+        grounding_index = build_grounding_index(seed_venues=seed_venues)
+        strict = False
+    else:
+        # Exa = web discovery (source_only). Google Places = verification (verified).
+        # Both fail safe to [] so the planner still runs on the sample venues.
+        exa_venues: list = []
+        google_venues: list = []
         try:
             from agents.discovery import exa_venue_supplements
-            extra = exa_venue_supplements(members, limit=3)
-            if extra:
-                venues = venues + extra
+            exa_venues = exa_venue_supplements(members, limit=3) or []
         except Exception:
-            pass
+            exa_venues = []
+        try:
+            from agents.google_places import search_verified_venues
+            google_venues = search_verified_venues(members, limit=8) or []
+        except Exception:
+            google_venues = []
+
+        strict = is_strict_real_venues()
+        grounded = google_venues + exa_venues
+        # In strict mode the planner may ONLY choose from grounded venues; sample
+        # venues are excluded so a fake/sample place can never win.
+        venues = filter_pool_for_strict(seed_venues, grounded, strict=strict)
+        grounding_index = build_grounding_index(
+            seed_venues=seed_venues, exa_venues=exa_venues, google_candidates=google_venues,
+        )
+        # Strict, and nothing grounded to choose from -> fail closed before booking.
+        if strict and not venues:
+            return _no_verified_venue(s)
+
     candidates = generate_candidates(members, venues)
     neg = run_negotiation(candidates, members)
     s["negotiation"] = neg["messages"]
     s["plan"] = neg["plan"]
+    # Lock the venue name to its grounded source and attach the verification block.
+    attach_grounding(s["plan"], grounding_index)
     # Quorum: fewer than half the agents could agree (budget / availability /
     # dietary). Don't strike a booking — fail and let the frontend alert the group.
     accepts = len((s["plan"] or {}).get("satisfies") or [])
@@ -154,6 +203,17 @@ def compute_plan(sid):
 
     s["booking_failed"] = False
     s["fail_reason"] = None
+
+    # Venue grounding gate: never present a fake/sample venue as a real result.
+    # In strict mode this fails closed rather than showing an unverified venue.
+    if sid == "ORK-001":
+        s["venue_status"] = venue_status_label(s["plan"], strict=False)
+    else:
+        decision = check_final_venue(s["plan"], strict=strict)
+        if decision["fail_closed"]:
+            return _no_verified_venue(s)
+        s["venue_status"] = decision["venue_status"]
+
     # HARD LIVE-FLOW SAFETY GATE (defense-in-depth, computed as early as possible).
     # A real x402 USDC payment is attempted ONLY when this is a live session AND
     # ENABLE_LIVE_REAL_X402 is exactly "true". This short-circuits before
@@ -315,6 +375,12 @@ def seed_demo():
     booking = strike_booking(seeded_plan)
     s["negotiation"] = _seeded_messages()
     s["plan"] = seeded_plan
+    # Grade the seeded venue as a labeled sample (demo). Additive — keeps the
+    # frozen Seoul Garden name and per_person=80 contract intact.
+    from agents.venue_grounding import (attach_grounding, build_grounding_index,
+                                        venue_status_label)
+    attach_grounding(seeded_plan, build_grounding_index(seed_venues=_load("venues.json")))
+    s["venue_status"] = venue_status_label(seeded_plan, strict=False)
     s["handshake"] = {
         "request": booking["request"],
         "response": booking["response"],
