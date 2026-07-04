@@ -14,11 +14,11 @@ from fastapi import HTTPException
 
 from agents.convener import (generate_candidates, run_negotiation, strike_booking,
                              _seeded_messages)
+from core import db
 from core.settlement import compute_net, simplify
 from payments.x402 import stamp
 
 DATA = os.path.join(os.path.dirname(__file__), "..", "data")
-SESSIONS = {}
 PHASES = ["negotiating", "plan_ready", "booking", "confirmed"]
 
 
@@ -28,7 +28,12 @@ def _load(name):
 
 
 def get(sid):
-    return SESSIONS.get(sid)
+    return db.get_session(sid)
+
+
+def delete_session(sid):
+    """Remove a session entirely from the store (used by the dev reseed route)."""
+    db.delete_session(sid)
 
 
 def _members(s):
@@ -37,7 +42,7 @@ def _members(s):
 
 def new_session(name=None, date_range=None):
     sid = "ORK-" + uuid.uuid4().hex[:4].upper()
-    SESSIONS[sid] = {
+    s = {
         "session_id": sid,
         "name": name or "Friday plan",
         "date_range": date_range,
@@ -50,7 +55,8 @@ def new_session(name=None, date_range=None):
         "expenses": [],
         "settlement": None,
     }
-    return SESSIONS[sid]
+    db.set_session(sid, s)  # write-through AFTER building the new session
+    return s
 
 
 def new_live_session(name=None, date_range=None):
@@ -73,20 +79,22 @@ def new_live_session(name=None, date_range=None):
     s["members"] = shells
     s["live"] = True
     s["ready"] = []
+    db.set_session(s["session_id"], s)  # write-through AFTER mutation
     return s
 
 
 def mark_ready(sid, person_id):
     """Record that one member pressed find-our-plan."""
-    if sid not in SESSIONS:
+    s = db.get_session(sid)
+    if s is None:
         raise HTTPException(status_code=404, detail="session not found")
     if not person_id:
         raise HTTPException(status_code=400, detail="person_id required")
-    s = SESSIONS[sid]
     if person_id not in [m["id"] for m in s["members"]]:
         raise HTTPException(status_code=400, detail="unknown person_id")
     if person_id not in s.setdefault("ready", []):
         s["ready"].append(person_id)
+    db.set_session(sid, s)  # write-through AFTER mutation
     return s
 
 
@@ -99,11 +107,11 @@ def all_ready(s):
 
 
 def add_constraints(sid, person):
-    if sid not in SESSIONS:
+    s = db.get_session(sid)
+    if s is None:
         raise HTTPException(status_code=404, detail="session not found")
     if not person.get("id"):
         raise HTTPException(status_code=400, detail="id required")
-    s = SESSIONS[sid]
     s["members"] = [m for m in s["members"] if m["id"] != person.get("id")] + [person]
     # New constraints invalidate any prior failure so an "Adjust constraints &
     # retry" actually recomputes. Without this the phase stays "failed" and
@@ -114,6 +122,7 @@ def add_constraints(sid, person):
         s["fail_reason"] = None
         s["plan"] = None
         s["negotiation"] = None
+    db.set_session(sid, s)  # write-through AFTER mutation
     return s
 
 
@@ -137,9 +146,9 @@ def _no_verified_venue(s):
 
 def compute_plan(sid):
     """Negotiation -> plan -> venue handshake. Moves phase to plan_ready."""
-    if sid not in SESSIONS:
+    s = db.get_session(sid)
+    if s is None:
         raise HTTPException(status_code=404, detail="session not found")
-    s = SESSIONS[sid]
     members = _members(s)
     seed_venues = _load("venues.json")
 
@@ -179,7 +188,9 @@ def compute_plan(sid):
         )
         # Strict, and nothing grounded to choose from -> fail closed before booking.
         if strict and not venues:
-            return _no_verified_venue(s)
+            _no_verified_venue(s)
+            db.set_session(sid, s)  # write-through AFTER mutation (fail-closed)
+            return s
 
     candidates = generate_candidates(members, venues)
     neg = run_negotiation(candidates, members)
@@ -199,6 +210,7 @@ def compute_plan(sid):
             "No venue fits enough of the group's budget, dates, and dietary needs."
         )
         s["phase"] = "failed"
+        db.set_session(sid, s)  # write-through AFTER mutation (quorum fail)
         return s
 
     s["booking_failed"] = False
@@ -211,7 +223,9 @@ def compute_plan(sid):
     else:
         decision = check_final_venue(s["plan"], strict=strict)
         if decision["fail_closed"]:
-            return _no_verified_venue(s)
+            _no_verified_venue(s)
+            db.set_session(sid, s)  # write-through AFTER mutation (fail-closed)
+            return s
         s["venue_status"] = decision["venue_status"]
 
     # HARD LIVE-FLOW SAFETY GATE (defense-in-depth, computed as early as possible).
@@ -249,15 +263,16 @@ def compute_plan(sid):
                 "description": f"Venue booking — {s['plan'].get('title', 'dinner')}",
                 "split": "even",
             })
+    db.set_session(sid, s)  # write-through AFTER mutation (normal success)
     return s
 
 
 def approve_plan(sid, person_id):
-    if sid not in SESSIONS:
+    s = db.get_session(sid)
+    if s is None:
         raise HTTPException(status_code=404, detail="session not found")
     if not person_id:
         raise HTTPException(status_code=400, detail="person_id required")
-    s = SESSIONS[sid]
     member_ids = [m["id"] for m in _members(s)]
     if person_id not in member_ids:
         raise HTTPException(status_code=400, detail="unknown person_id")
@@ -267,31 +282,33 @@ def approve_plan(sid, person_id):
         s["phase"] = "confirmed"
     elif s["phase"] == "plan_ready":
         s["phase"] = "booking"
+    db.set_session(sid, s)  # write-through AFTER mutation
     return s
 
 
 def add_expense(sid, expense):
-    if sid not in SESSIONS:
+    s = db.get_session(sid)
+    if s is None:
         raise HTTPException(status_code=404, detail="session not found")
-    s = SESSIONS[sid]
     expense.setdefault("id", "EXP-" + uuid.uuid4().hex[:4])
     s["expenses"].append(expense)
-    recompute_settlement(sid)
+    recompute_settlement(sid)  # recompute persists the whole session (write-through)
     return s
 
 
 def set_fronted(sid, fronted):
     """S11 confirm-fronted: override the fronted map and recompute."""
-    if sid not in SESSIONS:
+    s = db.get_session(sid)
+    if s is None:
         raise HTTPException(status_code=404, detail="session not found")
-    SESSIONS[sid]["_fronted_override"] = fronted
-    return recompute_settlement(sid)
+    s["_fronted_override"] = fronted
+    return recompute_settlement(sid)  # recompute persists the whole session
 
 
 def recompute_settlement(sid):
-    if sid not in SESSIONS:
+    s = db.get_session(sid)
+    if s is None:
         raise HTTPException(status_code=404, detail="session not found")
-    s = SESSIONS[sid]
     ids = [m["id"] for m in _members(s)]
     if s.get("_fronted_override"):
         fronted = {pid: s["_fronted_override"].get(pid, 0) for pid in ids}
@@ -314,26 +331,32 @@ def recompute_settlement(sid):
         "transfers": transfers,
         "net_after": {pid: 0 for pid in ids},
     }
+    db.set_session(sid, s)  # write-through AFTER mutation
     return s["settlement"]
 
 
 def approve_transfer(sid, person_id):
-    if sid not in SESSIONS:
+    s = db.get_session(sid)
+    if s is None:
         raise HTTPException(status_code=404, detail="session not found")
-    s = SESSIONS[sid]
     st = s["settlement"] or recompute_settlement(sid)
     for t in st["transfers"]:
         if t["from"] == person_id and t["status"] == "pending":
             t["status"] = "settled"
             t["tx_hash"] = stamp()
+    db.set_session(sid, s)  # write-through AFTER mutation
     return s
 
 
 def seed_demo():
-    """Pre-populate ORK-001 so the app is fully populated on boot."""
-    if "ORK-001" in SESSIONS:
+    """Pre-populate ORK-001 so the app is fully populated on boot.
+
+    Idempotent across restarts: if ORK-001 already exists in the store (SQLite
+    row survives a reboot), this returns immediately and never re-seeds.
+    """
+    if db.get_session("ORK-001") is not None:
         return
-    SESSIONS["ORK-001"] = {
+    db.set_session("ORK-001", {
         "session_id": "ORK-001",
         "name": "Friday — the squad",
         "date_range": ["2026-06-26", "2026-06-28"],
@@ -345,13 +368,13 @@ def seed_demo():
         "approvals": ["P-001", "P-003", "P-004", "P-005"],
         "expenses": [],
         "settlement": None,
-    }
+    })
     compute_plan("ORK-001")
     # Pin ORK-001 to frozen demo values.
     # per_person=80 = total expenses (240+100+60=400) / 5 people.
     # _seeded_plan() in convener.py is not used here because its values
     # can change as the agent layer evolves; these numbers are contractually frozen.
-    s = SESSIONS["ORK-001"]
+    s = db.get_session("ORK-001")
     seeded_plan = {
         "plan_id": "PLAN-1",
         "title": "Korean BBQ + arcade",
@@ -390,6 +413,7 @@ def seed_demo():
         "merchant": booking["mandate"]["merchant"],
     }
     s["phase"] = "plan_ready"
+    db.set_session("ORK-001", s)  # persist the frozen overrides before expenses
     for e in [
         {"paid_by": "P-001", "amount": 240, "description": "Dinner — KBBQ set", "split": "even"},
         {"paid_by": "P-002", "amount": 100, "description": "Arcade credit", "split": "even"},
