@@ -710,6 +710,6 @@ def discovery_venues(body: dict = Body(default={})):
 
 @app.post("/api/dev/reseed")
 def dev_reseed():
-    S.SESSIONS.pop("ORK-001", None)
+    S.delete_session("ORK-001")  # drop from cache + SQLite, then re-seed fresh
     S.seed_demo()
     return {"ok": True}
