@@ -257,6 +257,37 @@ check('POST /api/expense/ORK-001 {amount:"lots"} -> 400 (not numeric)',
       status == 400, f"got {status}")
 
 # ---------------------------------------------------------------------------
+section("X402 DEMO-RECEIPT — read endpoints + gate (never fires a payment)")
+# ---------------------------------------------------------------------------
+# These exercise the presenter-only fresh-proof surface WITHOUT spending USDC.
+# The run check uses a deliberately-wrong secret so no real payment can fire.
+
+# CHECK A — status endpoint answers with the presenter-panel status payload.
+# NOTE: the payload has no "status" key; its fields are enabled/cooldown_*/amount/
+# network/etc. We assert on "enabled" (a real field) rather than a non-existent one.
+status, body = http("GET", "/api/x402/demo-receipt/status")
+check("GET /api/x402/demo-receipt/status -> 200 + enabled field",
+      status == 200 and isinstance(body, dict) and "enabled" in body,
+      f"got status={status} body={body}")
+
+# CHECK B — latest endpoint returns a receipt carrying a txHash (saved fallback
+# when no fresh proof has fired this process).
+status, body = http("GET", "/api/x402/demo-receipt/latest")
+check("GET /api/x402/demo-receipt/latest -> 200 + txHash field",
+      status == 200 and isinstance(body, dict) and bool(body.get("txHash")),
+      f"got status={status} body={body}")
+
+# CHECK C — the gate rejects a wrong secret and NEVER fires a payment. Gate order
+# is 404 (feature disabled) BEFORE 403 (bad secret), so in the default demo config
+# (ENABLE_X402_DEMO_RECEIPT unset) this returns 404; with the feature enabled it
+# returns 403. Both prove the gate blocks a bad secret — a 200/500/502 here would
+# be the failure. We accept {403, 404}; anything else fails.
+status, body = http("POST", "/api/x402/demo-receipt/run",
+                    {"confirm": "PAY_0.001_USDC"})
+check("POST /api/x402/demo-receipt/run (wrong/no secret) -> 403 or 404 (gate holds)",
+      status in (403, 404), f"got status={status} body={body}")
+
+# ---------------------------------------------------------------------------
 section("RESET + RE-PROVE")
 # ---------------------------------------------------------------------------
 
