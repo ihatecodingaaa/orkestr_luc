@@ -148,6 +148,94 @@ def get_member_prefs(member_id):
     return db.get_member_prefs(member_id)
 
 
+def _first_constraint_value(members, key, fallback=None):
+    """First non-empty constraints[key] across ALL members, else fallback."""
+    for m in members:
+        if not isinstance(m, dict):
+            continue
+        val = (m.get("constraints") or {}).get(key)
+        if val:
+            return val
+    return fallback
+
+
+def generate_real_plan(sid):
+    """Real-venue plan path for a non-seeded session — BYPASSES the convener.
+
+    Searches Google Places for a venue matching the group's location/cuisine and
+    builds a plan carrying the FROZEN venue shape {name, address, lat, lng, tags}.
+    Never touches ORK-001 (refused with 400) or compute_plan. Returns the plan.
+    """
+    if sid == "ORK-001":
+        raise HTTPException(
+            status_code=400,
+            detail="ORK-001 is the frozen seeded demo; real venue search is disabled for it")
+    s = db.get_session(sid)
+    if s is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    members = s.get("members") or []
+    if not members:
+        raise HTTPException(status_code=400, detail="session has no members with constraints yet")
+
+    # Location priority: constraints.location -> constraints.origin -> "Singapore".
+    # Cuisine: constraints.cuisine -> "restaurant". First non-empty across ALL members.
+    location = (_first_constraint_value(members, "location")
+                or _first_constraint_value(members, "origin")
+                or "Singapore")
+    cuisine = _first_constraint_value(members, "cuisine", "restaurant")
+    dietary = sorted({d for m in members if isinstance(m, dict)
+                      for d in ((m.get("constraints") or {}).get("dietary") or [])})
+    budgets = [(m.get("constraints") or {}).get("budget_max") for m in members
+               if isinstance(m, dict)
+               and isinstance((m.get("constraints") or {}).get("budget_max"), (int, float))
+               and not isinstance((m.get("constraints") or {}).get("budget_max"), bool)]
+    budget_max = min(budgets) if budgets else None
+    group_size = len(members)
+
+    # Key is read from the environment ONLY, never hardcoded. USE_REAL_SEARCH=true
+    # with an absent key is a loud misconfiguration (500); otherwise an absent/bad
+    # key falls back gracefully inside search_venues so the demo never breaks.
+    from ai import venue_search
+    api_key = os.environ.get("GOOGLE_PLACES_API_KEY", "").strip()
+    use_real = os.environ.get("USE_REAL_SEARCH", "").strip().lower() in ("true", "1", "yes")
+    if use_real and not api_key:
+        raise HTTPException(
+            status_code=500,
+            detail="USE_REAL_SEARCH=true but GOOGLE_PLACES_API_KEY is not set")
+
+    venues = venue_search.search_venues(location, cuisine, budget_max, dietary, group_size, api_key)
+    if not venues:
+        raise HTTPException(status_code=502, detail="venue search returned no venues")
+    venue = venues[0]  # top-rated real result, or first fallback venue
+
+    per_person = budget_max if isinstance(budget_max, (int, float)) else 0
+    plan = {
+        "plan_id": "REAL-" + sid,
+        "title": f"{str(cuisine).title()} in {location}",
+        "day": "FRI",
+        "time": "19:30",
+        "venue": {  # FROZEN 5-key shape — nothing added or removed
+            "name": venue.get("name"),
+            "address": venue.get("address"),
+            "lat": venue.get("lat"),
+            "lng": venue.get("lng"),
+            "tags": venue.get("tags") or [],
+        },
+        "activity": {"name": f"Explore {location}"},
+        "total_cost": per_person * group_size,
+        "per_person": per_person,
+        "booking_ref": None,
+        "mandate_status": "pending",
+        "satisfies": [m.get("id") for m in members if isinstance(m, dict)],
+        "conflicts": [],
+    }
+    s["plan"] = plan
+    s["venue_status"] = "real_search"
+    s["phase"] = "plan_ready"
+    db.set_session(sid, s)  # write-through AFTER mutation
+    return plan
+
+
 def _no_verified_venue(s):
     """Safe no-result state when strict grounding finds no real restaurant.
 

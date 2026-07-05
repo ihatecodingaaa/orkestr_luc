@@ -584,6 +584,16 @@ def session_public(sid: str):
     }
 
 
+# ---- Real venue search: generate a plan from live Google Places results ----
+# Separate path that bypasses the seeded convener. Searches Google Places for a
+# real venue matching the group's location/cuisine, sets session["plan"], and
+# returns it. Refuses ORK-001 (400, frozen); unknown session -> 404; falls back
+# to data/venues.json if the API key is absent/invalid so it never 500s on that.
+@app.post("/api/session/plan/{sid}")
+def session_plan(sid: str):
+    return S.generate_real_plan(sid)
+
+
 @app.get("/api/plan/{sid}")
 def plan(sid: str):
     s = _require_session(sid)
