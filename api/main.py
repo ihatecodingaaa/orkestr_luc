@@ -219,20 +219,19 @@ async def x402_demo_receipt_run(payload: dict = Body(default={}),
     return JSONResponse(status_code=status_code, content=body_out)
 
 
-# ---- Shareable group-mandate receipt (self-contained HTML, zero JS/deps) ----
+# ---- Shareable group-mandate receipt + story-format share card ----
 # A judge opens GET /receipt/{sid} on a phone after the demo. Read-only: no login,
 # no JavaScript, no external stylesheet/CDN, inline CSS only. Unknown sid -> 404
-# JSON (same policy as every other route). The payment proof reads latest_receipt()
-# — the saved verified receipt by default, or the fresh one if a live proof was
-# fired this process — and NEVER triggers a payment.
-@app.get("/receipt/{sid}")
-def receipt_page(sid: str):
+# JSON. The payment proof reads latest_receipt() (saved verified or fresh, never
+# triggers a payment). GET /receipt/{sid}/card is a fixed story-format share card.
+# A venue photo, when present, loads via the /api/venue/photo proxy so the Google
+# Places API key NEVER reaches the browser.
+def _receipt_context(s):
+    """Build the shared, escaped HTML fragments used by both receipt views."""
     import html as _html
 
-    from fastapi.responses import HTMLResponse
     from payments import x402_demo_receipt as XDR
 
-    s = _require_session(sid)  # raises 404 {"detail":"session not found"}
     plan = s.get("plan") or {}
     hs = s.get("handshake") or {}
     members = s.get("members") or []
@@ -241,18 +240,15 @@ def receipt_page(sid: str):
     def esc(v):
         return _html.escape("" if v is None else str(v))
 
-    # --- header / session ---
-    session_name = esc(s.get("name") or sid)
+    session_name = esc(s.get("name") or s.get("session_id") or "—")
     date_range = s.get("date_range") or []
     date_str = esc(" – ".join(date_range)) if isinstance(date_range, list) and date_range else ""
     date_block = (f'<div style="color:#666;font-size:14px;margin-top:2px;">{date_str}</div>'
                   if date_str else "")
 
-    # --- signatories ---
     names = [esc(m.get("name") or m.get("id")) for m in members if isinstance(m, dict)]
     signatories = ", ".join(n for n in names if n) or "—"
 
-    # --- venue card ---
     venue = (plan.get("venue") or {}) if isinstance(plan, dict) else {}
     venue_name = esc(venue.get("name") or plan.get("title") or "—")
     day = esc(plan.get("day") or "")
@@ -261,7 +257,6 @@ def receipt_page(sid: str):
     per_person = plan.get("per_person")
     per_person_str = f"${esc(per_person)}" if per_person is not None else "—"
 
-    # --- booking ref + mandate status ---
     booking_ref = esc(hs.get("booking_ref") or plan.get("booking_ref") or "—")
     status = (hs.get("status") or plan.get("mandate_status") or "").strip()
     status_disp = esc(status or "—")
@@ -269,7 +264,13 @@ def receipt_page(sid: str):
     badge_css = ("color:#1a7f37;background:#e6f4ea;" if cosigned
                  else "color:#555;background:#eee;")
 
-    # --- payment proof (reads latest_receipt(): saved verified OR fresh) ---
+    # Venue photo via the proxy (relative URL, no API key). Absent for ORK-001.
+    photo_url = plan.get("venue_photo_url") if isinstance(plan, dict) else None
+    photo_html = (
+        f'<img src="{esc(photo_url)}" alt="{venue_name}" '
+        f'style="width:100%;height:180px;object-fit:cover;border-radius:8px;margin-bottom:16px;">'
+        if photo_url else "")
+
     tx = receipt.get("txHash") if isinstance(receipt, dict) else None
     explorer = receipt.get("blockExplorerUrl") if isinstance(receipt, dict) else None
     frontend = os.environ.get("FRONTEND_URL", "").strip()
@@ -296,51 +297,127 @@ def receipt_page(sid: str):
             'border-radius:10px;font-size:15px;">payment pending — receipt not yet fired</div>'
         )
 
+    return {
+        "session_name": session_name, "date_block": date_block,
+        "signatories": signatories, "venue_name": venue_name, "when": when,
+        "per_person_str": per_person_str, "booking_ref": booking_ref,
+        "status_disp": status_disp, "badge_css": badge_css,
+        "photo_html": photo_html, "proof_html": proof_html,
+    }
+
+
+def _receipt_card_body(ctx):
+    """The inner white-card HTML shared by the receipt page and the share card.
+
+    ctx['photo_html'] is the top venue <img> (empty string when no photo)."""
+    return f"""      {ctx['photo_html']}
+      <div style="font-size:13px;letter-spacing:0.04em;text-transform:uppercase;color:#666;">Orkestr · group mandate receipt</div>
+      <h1 style="margin:6px 0 0;font-size:22px;line-height:1.25;">{ctx['session_name']}</h1>
+      {ctx['date_block']}
+
+      <div style="margin:16px 0 4px;">
+        <span style="display:inline-block;background:#FF6B4A;color:#fff;font-size:12px;font-weight:700;letter-spacing:0.03em;padding:6px 12px;border-radius:999px;">AP2 Group Mandate</span>
+        <span style="display:inline-block;margin-left:6px;font-size:12px;font-weight:600;padding:6px 12px;border-radius:999px;{ctx['badge_css']}">{ctx['status_disp']}</span>
+      </div>
+
+      <div style="margin-top:20px;">
+        <div style="font-size:12px;text-transform:uppercase;letter-spacing:0.04em;color:#888;margin-bottom:6px;">Signatories</div>
+        <div style="font-size:16px;line-height:1.5;">{ctx['signatories']}</div>
+      </div>
+
+      <div style="margin-top:16px;border:1px solid #eee;border-radius:12px;padding:16px;">
+        <div style="font-size:12px;text-transform:uppercase;letter-spacing:0.04em;color:#888;margin-bottom:6px;">Venue</div>
+        <div style="font-size:18px;font-weight:600;">{ctx['venue_name']}</div>
+        <div style="color:#444;font-size:15px;margin-top:4px;">{ctx['when']}</div>
+        <div style="color:#444;font-size:15px;margin-top:2px;">{ctx['per_person_str']} / person</div>
+      </div>
+
+      <div style="margin-top:16px;display:flex;justify-content:space-between;align-items:center;gap:12px;">
+        <span style="font-size:12px;text-transform:uppercase;letter-spacing:0.04em;color:#888;">Booking reference</span>
+        <span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:15px;font-weight:600;text-align:right;">{ctx['booking_ref']}</span>
+      </div>
+
+      <div style="margin-top:20px;">
+        <div style="font-size:12px;text-transform:uppercase;letter-spacing:0.04em;color:#888;margin-bottom:8px;">Payment proof</div>
+        {ctx['proof_html']}
+      </div>
+
+      <div style="margin-top:24px;padding-top:16px;border-top:1px solid #eee;text-align:center;color:#999;font-size:12px;">verified on Base Sepolia · built at Build2026</div>"""
+
+
+@app.get("/api/venue/photo")
+def venue_photo(ref: str = ""):
+    """Proxy a Google Places photo so the API key never reaches the browser.
+
+    `ref` is the Places photo resource name (e.g. "places/AAA/photos/BBB"). Reads
+    GOOGLE_PLACES_API_KEY from env, fetches the media server-side, and streams the
+    bytes back with Google's Content-Type. 400 if ref missing; 503 if the key is
+    unset; 502 on any fetch error. The key never appears in any client response.
+    """
+    import urllib.request
+
+    from fastapi.responses import Response
+
+    if not ref:
+        raise HTTPException(status_code=400, detail="ref required")
+    key = os.environ.get("GOOGLE_PLACES_API_KEY", "").strip()
+    if not key:
+        raise HTTPException(status_code=503, detail="photo service unavailable")
+    url = f"https://places.googleapis.com/v1/{ref}/media?maxWidthPx=800&key={key}"
+    try:
+        with urllib.request.urlopen(url, timeout=8) as resp:
+            content = resp.read()
+            content_type = resp.headers.get("Content-Type", "image/jpeg")
+    except Exception:
+        raise HTTPException(status_code=502, detail="failed to fetch venue photo")
+    return Response(content=content, media_type=content_type)
+
+
+@app.get("/receipt/{sid}")
+def receipt_page(sid: str):
+    from fastapi.responses import HTMLResponse
+
+    s = _require_session(sid)  # raises 404 {"detail":"session not found"}
+    ctx = _receipt_context(s)
+    body = _receipt_card_body(ctx)
     page = f"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Orkestr receipt · {session_name}</title>
+<title>Orkestr receipt · {ctx['session_name']}</title>
 </head>
 <body style="margin:0;padding:0;background:#f5f5f7;color:#111;-webkit-text-size-adjust:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
   <div style="max-width:480px;margin:0 auto;padding:20px 16px 40px;">
     <div style="background:#fff;border-radius:16px;padding:22px 20px;box-shadow:0 1px 3px rgba(0,0,0,0.08);">
-
-      <div style="font-size:13px;letter-spacing:0.04em;text-transform:uppercase;color:#666;">Orkestr · group mandate receipt</div>
-      <h1 style="margin:6px 0 0;font-size:22px;line-height:1.25;">{session_name}</h1>
-      {date_block}
-
-      <div style="margin:16px 0 4px;">
-        <span style="display:inline-block;background:#FF6B4A;color:#fff;font-size:12px;font-weight:700;letter-spacing:0.03em;padding:6px 12px;border-radius:999px;">AP2 Group Mandate</span>
-        <span style="display:inline-block;margin-left:6px;font-size:12px;font-weight:600;padding:6px 12px;border-radius:999px;{badge_css}">{status_disp}</span>
-      </div>
-
-      <div style="margin-top:20px;">
-        <div style="font-size:12px;text-transform:uppercase;letter-spacing:0.04em;color:#888;margin-bottom:6px;">Signatories</div>
-        <div style="font-size:16px;line-height:1.5;">{signatories}</div>
-      </div>
-
-      <div style="margin-top:16px;border:1px solid #eee;border-radius:12px;padding:16px;">
-        <div style="font-size:12px;text-transform:uppercase;letter-spacing:0.04em;color:#888;margin-bottom:6px;">Venue</div>
-        <div style="font-size:18px;font-weight:600;">{venue_name}</div>
-        <div style="color:#444;font-size:15px;margin-top:4px;">{when}</div>
-        <div style="color:#444;font-size:15px;margin-top:2px;">{per_person_str} / person</div>
-      </div>
-
-      <div style="margin-top:16px;display:flex;justify-content:space-between;align-items:center;gap:12px;">
-        <span style="font-size:12px;text-transform:uppercase;letter-spacing:0.04em;color:#888;">Booking reference</span>
-        <span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:15px;font-weight:600;text-align:right;">{booking_ref}</span>
-      </div>
-
-      <div style="margin-top:20px;">
-        <div style="font-size:12px;text-transform:uppercase;letter-spacing:0.04em;color:#888;margin-bottom:8px;">Payment proof</div>
-        {proof_html}
-      </div>
-
-      <div style="margin-top:24px;padding-top:16px;border-top:1px solid #eee;text-align:center;color:#999;font-size:12px;">verified on Base Sepolia · built at Build2026</div>
-
+{body}
     </div>
+  </div>
+</body>
+</html>"""
+    return HTMLResponse(content=page, status_code=200)
+
+
+@app.get("/receipt/{sid}/card")
+def receipt_card(sid: str):
+    """Fixed 480x850 story-format share card: same content as /receipt/{sid} plus a
+    'Planned by Orkestr' watermark. Optimised for screenshot-and-share (no scroll)."""
+    from fastapi.responses import HTMLResponse
+
+    s = _require_session(sid)
+    ctx = _receipt_context(s)
+    body = _receipt_card_body(ctx)
+    page = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orkestr card · {ctx['session_name']}</title>
+</head>
+<body style="margin:0;padding:0;background:#f5f5f7;color:#111;-webkit-text-size-adjust:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+  <div style="width:480px;min-height:850px;position:relative;overflow:hidden;margin:0 auto;background:#fff;box-sizing:border-box;padding:24px 22px;">
+{body}
+      <div style="position:absolute;bottom:12px;right:16px;font-size:11px;color:#888;">Planned by Orkestr</div>
   </div>
 </body>
 </html>"""

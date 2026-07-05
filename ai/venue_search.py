@@ -65,13 +65,20 @@ def _fallback_venues():
 
 
 def _map_place(place):
-    """One Places result -> frozen dict plus an internal _rating (stripped later)."""
+    """One Places result -> frozen dict plus internal _rating/_photo_name keys.
+
+    _rating (sort key) and _photo_name (first photo resource name) are internal
+    ONLY and are stripped before search_venues returns, so the returned dicts
+    keep exactly the frozen 5 keys.
+    """
     loc = place.get("location") or {}
     types = place.get("types") or []
     tags = list(types[:3])  # first 3 of types
     price_tag = _PRICE_TAG.get(place.get("priceLevel"))
     if price_tag:
         tags.append(price_tag)
+    photos = place.get("photos") or []
+    photo_name = photos[0].get("name") if photos and isinstance(photos[0], dict) else None
     return {
         "name": (place.get("displayName") or {}).get("text"),
         "address": place.get("formattedAddress"),
@@ -79,22 +86,25 @@ def _map_place(place):
         "lng": loc.get("longitude"),
         "tags": tags,
         "_rating": place.get("rating") or 0,  # internal sort key ONLY
+        "_photo_name": photo_name,            # internal photo ref ONLY
     }
 
 
 def search_venues(location, cuisine_prefs, budget_max, dietary, group_size, api_key):
-    """Return a list of venue dicts ({name, address, lat, lng, tags}) for the query.
+    """Return (venues, photo_name): a list of frozen-5-key venue dicts plus the
+    top venue's Places photo resource name (or None).
 
     Real Google Places (New) Text Search when api_key is present; otherwise, or on
-    ANY error/empty result, falls back to data/venues.json. Results are sorted by
-    Google rating DESCending; rating is used ONLY for ordering and is stripped so
-    the returned dicts contain exactly the frozen 5 keys.
+    ANY error/empty result, falls back to data/venues.json with photo_name=None.
+    Results are sorted by Google rating DESCending; rating and photo name are
+    internal only and are stripped so each returned dict contains exactly the
+    frozen 5 keys {name, address, lat, lng, tags}.
 
     budget_max/dietary/group_size are accepted for query context and future
     filtering; they never alter the returned shape.
     """
     if not api_key:
-        return _fallback_venues()
+        return _fallback_venues(), None
 
     text_query = build_text_query(location, cuisine_prefs)
     body = json.dumps({"textQuery": text_query, "maxResultCount": 5}).encode()
@@ -111,16 +121,20 @@ def search_venues(location, cuisine_prefs, budget_max, dietary, group_size, api_
             data = json.loads(resp.read())
     except Exception:
         # URLError, HTTPError (bad key -> 400/403), timeout, JSON error -> fallback.
-        return _fallback_venues()
+        return _fallback_venues(), None
 
     places = data.get("places") if isinstance(data, dict) else None
     if not places:
-        return _fallback_venues()
+        return _fallback_venues(), None
 
     mapped = [_map_place(p) for p in places if isinstance(p, dict)]
-    # Addition 1: sort by rating desc, then strip the internal _rating so only the
-    # frozen 5 keys remain in each returned dict.
+    if not mapped:
+        return _fallback_venues(), None
+    # Sort by rating desc, capture the top venue's photo, then strip the internal
+    # _rating/_photo_name so only the frozen 5 keys remain in each returned dict.
     mapped.sort(key=lambda v: v.get("_rating") or 0, reverse=True)
+    photo_name = mapped[0].get("_photo_name")
     for v in mapped:
         v.pop("_rating", None)
-    return mapped or _fallback_venues()
+        v.pop("_photo_name", None)
+    return mapped, photo_name
