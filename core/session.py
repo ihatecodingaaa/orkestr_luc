@@ -203,7 +203,8 @@ def generate_real_plan(sid):
             status_code=500,
             detail="USE_REAL_SEARCH=true but GOOGLE_PLACES_API_KEY is not set")
 
-    venues = venue_search.search_venues(location, cuisine, budget_max, dietary, group_size, api_key)
+    venues, photo_name = venue_search.search_venues(
+        location, cuisine, budget_max, dietary, group_size, api_key)
     if not venues:
         raise HTTPException(status_code=502, detail="venue search returned no venues")
     venue = venues[0]  # top-rated real result, or first fallback venue
@@ -229,6 +230,11 @@ def generate_real_plan(sid):
         "satisfies": [m.get("id") for m in members if isinstance(m, dict)],
         "conflicts": [],
     }
+    if photo_name is not None:
+        # Store only the photo REFERENCE (no API key, no Google URL). The
+        # /api/venue/photo proxy assembles the real URL server-side, so the key
+        # never reaches the browser. Additive plan key; frozen venue dict unchanged.
+        plan["venue_photo_url"] = f"/api/venue/photo?ref={photo_name}"
     s["plan"] = plan
     s["venue_status"] = "real_search"
     s["phase"] = "plan_ready"
