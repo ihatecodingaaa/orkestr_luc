@@ -16,6 +16,7 @@ import json
 import os
 import sqlite3
 import threading
+from datetime import datetime, timezone
 
 # sessions.db lives in the repo root (core/../sessions.db). It is covered by the
 # existing ".db" .gitignore rule, so it is never tracked.
@@ -29,6 +30,13 @@ _CACHE = {}
 _CONN = sqlite3.connect(DB_PATH, check_same_thread=False)
 _CONN.execute(
     "CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, data TEXT NOT NULL)")
+# Group memory: a returning member's constraints are stored by their stable id
+# (P-002 etc.) so a new session can auto-populate them. constraints is a JSON
+# string; independent of the sessions table above.
+_CONN.execute(
+    "CREATE TABLE IF NOT EXISTS member_prefs ("
+    "member_id TEXT PRIMARY KEY, name TEXT, constraints TEXT, "
+    "freeform TEXT, updated_at TEXT)")
 _CONN.commit()
 
 
@@ -75,6 +83,57 @@ def list_sessions():
     with _LOCK:
         rows = _CONN.execute("SELECT id FROM sessions").fetchall()
     return [r[0] for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Group memory — persistent per-member constraints (keyed by stable member id)
+# ---------------------------------------------------------------------------
+
+def _row_to_prefs(row):
+    """Shape a member_prefs row into a public dict (constraints JSON -> dict)."""
+    if row is None:
+        return None
+    return {
+        "member_id": row[0],
+        "name": row[1],
+        "constraints": json.loads(row[2]) if row[2] else {},
+        "freeform": row[3] or "",
+        "updated_at": row[4],
+    }
+
+
+def save_member_prefs(member_id, name, constraints_dict, freeform):
+    """Upsert a member's stored constraints. Overwrites any prior row (memory is
+    replaced, not merged) and stamps updated_at with the current UTC time.
+    """
+    blob = json.dumps(constraints_dict or {})
+    updated_at = datetime.now(timezone.utc).isoformat()
+    with _LOCK:
+        _CONN.execute(
+            "INSERT OR REPLACE INTO member_prefs "
+            "(member_id, name, constraints, freeform, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (member_id, name, blob, freeform or "", updated_at))
+        _CONN.commit()
+    return _row_to_prefs((member_id, name, blob, freeform or "", updated_at))
+
+
+def get_member_prefs(member_id):
+    """Return a member's stored prefs dict, or None if never saved."""
+    with _LOCK:
+        row = _CONN.execute(
+            "SELECT member_id, name, constraints, freeform, updated_at "
+            "FROM member_prefs WHERE member_id = ?", (member_id,)).fetchone()
+    return _row_to_prefs(row)
+
+
+def get_all_member_prefs():
+    """All stored member pref dicts (for a future group-memory dashboard)."""
+    with _LOCK:
+        rows = _CONN.execute(
+            "SELECT member_id, name, constraints, freeform, updated_at "
+            "FROM member_prefs ORDER BY member_id").fetchall()
+    return [_row_to_prefs(r) for r in rows]
 
 
 def _validate_json_roundtrip():

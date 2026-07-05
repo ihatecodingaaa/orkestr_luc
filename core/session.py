@@ -110,9 +110,23 @@ def add_constraints(sid, person):
     s = db.get_session(sid)
     if s is None:
         raise HTTPException(status_code=404, detail="session not found")
-    if not person.get("id"):
+    member_id = person.get("id")
+    if not member_id:
         raise HTTPException(status_code=400, detail="id required")
-    s["members"] = [m for m in s["members"] if m["id"] != person.get("id")] + [person]
+    # Group memory pre-population: a returning member who is NEW to this session
+    # and submits NO constraints is auto-filled from their stored prefs, so they
+    # only confirm instead of re-entering. A member who submits real constraints
+    # is left untouched — fresh input always wins over stale memory.
+    is_new_to_session = member_id not in [m["id"] for m in s["members"]]
+    if is_new_to_session and not person.get("constraints"):
+        remembered = db.get_member_prefs(member_id)
+        if remembered:
+            person["constraints"] = remembered.get("constraints") or {}
+            if not person.get("name"):
+                person["name"] = remembered.get("name")
+            if not person.get("freeform"):
+                person["freeform"] = remembered.get("freeform") or ""
+    s["members"] = [m for m in s["members"] if m["id"] != member_id] + [person]
     # New constraints invalidate any prior failure so an "Adjust constraints &
     # retry" actually recomputes. Without this the phase stays "failed" and
     # /api/status returns the stale fail_reason no matter what changed.
@@ -123,7 +137,15 @@ def add_constraints(sid, person):
         s["plan"] = None
         s["negotiation"] = None
     db.set_session(sid, s)  # write-through AFTER mutation
+    # Persist this member's (possibly just-populated) constraints to group memory.
+    db.save_member_prefs(member_id, person.get("name"),
+                         person.get("constraints") or {}, person.get("freeform") or "")
     return s
+
+
+def get_member_prefs(member_id):
+    """Stored group-memory prefs for a member (or None). Used by the prefs API."""
+    return db.get_member_prefs(member_id)
 
 
 def _no_verified_venue(s):

@@ -448,6 +448,18 @@ def constraints(person: dict = Body(...)):
     return {"ok": True}
 
 
+# ---- Group memory: a returning member's stored constraints (pre-fill form) ----
+@app.get("/api/member/{member_id}/prefs")
+def member_prefs(member_id: str):
+    """Return a member's stored group-memory prefs so the frontend can pre-fill
+    their constraint form. 404 if this member has never submitted before.
+    """
+    prefs = S.get_member_prefs(member_id)
+    if prefs is None:
+        raise HTTPException(status_code=404, detail="no stored prefs for member")
+    return prefs
+
+
 @app.get("/api/status/{sid}")
 def status(sid: str):
     s = _require_session(sid)
