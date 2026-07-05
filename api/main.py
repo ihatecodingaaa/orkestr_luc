@@ -413,6 +413,38 @@ def session_start(payload: dict = Body(default={})):
             "invite_url": f"https://orkestr.app/join/{s['session_id']}"}
 
 
+# ---- QR join: a scannable invite that turns a judge's phone into a live node ----
+# No dependency/library: the QR image is rendered by api.qrserver.com. The
+# invite_url matches the format returned by /api/session/start above.
+def _invite_and_qr(sid: str):
+    """Return (invite_url, qr_url) for a session id. qr_url is a ready-to-embed
+    api.qrserver.com PNG encoding the invite_url (URL-encoded into the data param)."""
+    from urllib.parse import quote
+
+    invite_url = f"{os.environ.get('FRONTEND_URL', 'https://orkestr-luc.vercel.app')}/join/{sid}"
+    qr_url = ("https://api.qrserver.com/v1/create-qr-code/?data="
+              + quote(invite_url, safe="") + "&size=300x300&format=png")
+    return invite_url, qr_url
+
+
+@app.get("/api/session/{sid}/qr")
+def session_qr(sid: str):
+    """302-redirect to a scannable QR PNG pointing at the session invite_url."""
+    from fastapi.responses import RedirectResponse
+
+    _require_session(sid)  # 404 if the session does not exist
+    _, qr_url = _invite_and_qr(sid)
+    return RedirectResponse(qr_url, status_code=302)
+
+
+@app.get("/api/session/{sid}/invite")
+def session_invite(sid: str):
+    """JSON {invite_url, qr_url} so the frontend can embed qr_url as an <img src>."""
+    _require_session(sid)  # 404 if the session does not exist
+    invite_url, qr_url = _invite_and_qr(sid)
+    return {"invite_url": invite_url, "qr_url": qr_url}
+
+
 @app.post("/api/session/live")
 def session_live(payload: dict = Body(default={})):
     """Fresh, unseeded session with 5 member identities and empty constraints.
@@ -582,6 +614,16 @@ def session_public(sid: str):
         "venue_verification": venue_verification,
         "plan": plan_summary,
     }
+
+
+# ---- Real venue search: generate a plan from live Google Places results ----
+# Separate path that bypasses the seeded convener. Searches Google Places for a
+# real venue matching the group's location/cuisine, sets session["plan"], and
+# returns it. Refuses ORK-001 (400, frozen); unknown session -> 404; falls back
+# to data/venues.json if the API key is absent/invalid so it never 500s on that.
+@app.post("/api/session/plan/{sid}")
+def session_plan(sid: str):
+    return S.generate_real_plan(sid)
 
 
 @app.get("/api/plan/{sid}")
