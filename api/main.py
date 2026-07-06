@@ -538,6 +538,20 @@ def session_live(payload: dict = Body(default={})):
     }
 
 
+@app.post("/api/session/clone/{sid}")
+def session_clone(sid: str):
+    """Clone a settled session's crew into a fresh session for the next outing.
+
+    "Friday coming up? Plan another dinner with this crew." Copies only the member
+    id + name list (constraints come from group memory when members re-submit).
+    Unknown sid -> 404; ORK-001 -> 400 (frozen demo, never cloned). Returns
+    {session_id, invite_url} for the freshly created session.
+    """
+    s = S.clone_session(sid)
+    invite_url, _ = _invite_and_qr(s["session_id"])
+    return {"session_id": s["session_id"], "invite_url": invite_url}
+
+
 @app.post("/api/ready/{sid}")
 def ready(sid: str, body: dict = Body(...)):
     s = _require_session(sid)
