@@ -43,6 +43,7 @@ import {
   readLiveState,
   shortHash,
   submitConstraints,
+  toReceipt,
 } from "@/lib/orkestr-api";
 import type {
   Constraints,
@@ -692,9 +693,23 @@ export function GroupRoom({
 
   const planVerification = displayPlan?.venue?.verification;
   const bookingMode = bookingModeLabel(planVerification);
-  // Live Mode: the saved receipt is NOT the live proof — until a fresh proof is
-  // run, the proof card shows "not run yet" with the saved receipt as secondary.
-  const awaitingFreshProof = IS_LIVE_MODE && !receipt.isFresh;
+
+  // A real fresh receipt auto-fired by the backend at booking time (compute_plan /
+  // generate_real_plan) arrives on the public snapshot. Prefer it over the saved
+  // fallback / presenter state so Live Mode shows a real on-chain tx with no manual
+  // trigger. The presenter FreshProofPanel path still works via the `receipt` state
+  // that activeReceipt falls back to when the session hasn't auto-fired one.
+  const sessionReceipt = useMemo(
+    () => (pub.data?.x402_receipt ? toReceipt(pub.data.x402_receipt) : null),
+    [pub.data],
+  );
+  const activeReceipt: X402Receipt = sessionReceipt?.isFresh ? sessionReceipt : receipt;
+
+  // Live Mode: the saved receipt is NOT the live proof — until a fresh proof lands
+  // (auto-fired by the booking, or run by the presenter) the card shows "not run
+  // yet" with the saved receipt as secondary. Once a real fresh receipt exists,
+  // activeReceipt.isFresh is true and the card shows the real payment automatically.
+  const awaitingFreshProof = IS_LIVE_MODE && !activeReceipt.isFresh;
   const backendConnected = !backendDown && (Boolean(pub.data) || Boolean(freshStatus));
 
   const realX402 =
@@ -860,11 +875,11 @@ export function GroupRoom({
                     verification={displayPlan.venue?.verification}
                     split={split}
                     venueName={displayPlan.venue?.name}
-                    receipt={receipt}
+                    receipt={activeReceipt}
                     awaitingFreshProof={awaitingFreshProof}
                   />
                   <MerchantAdapterCard verification={displayPlan.venue?.verification} />
-                  <PaymentProofCard receipt={receipt} awaitingFreshProof={awaitingFreshProof} />
+                  <PaymentProofCard receipt={activeReceipt} awaitingFreshProof={awaitingFreshProof} />
                   <SmartSplitCard
                     split={split}
                     mode={splitMode}
@@ -881,7 +896,7 @@ export function GroupRoom({
 
       {isLive && PRESENTER_TOOLS_VISIBLE ? <HowToDemo /> : null}
 
-      {isLive && PRESENTER_TOOLS_VISIBLE ? <WalletLab receipt={receipt} /> : null}
+      {isLive && PRESENTER_TOOLS_VISIBLE ? <WalletLab receipt={activeReceipt} /> : null}
 
       {isLive && PRESENTER_TOOLS_VISIBLE ? (
         <LiveReadinessPanel

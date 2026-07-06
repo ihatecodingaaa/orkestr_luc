@@ -7,7 +7,9 @@ real negotiation/constraint logic per the Build Guide without touching the API.
 Owner: Lucas (session plumbing) + Jaydon (the agent calls).
 """
 import json
+import logging
 import os
+import threading
 import uuid
 
 from fastapi import HTTPException
@@ -20,6 +22,8 @@ from payments.x402 import stamp
 
 DATA = os.path.join(os.path.dirname(__file__), "..", "data")
 PHASES = ["negotiating", "plan_ready", "booking", "confirmed"]
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _load(name):
@@ -159,6 +163,44 @@ def _first_constraint_value(members, key, fallback=None):
     return fallback
 
 
+def _maybe_fire_x402_receipt(s, sid):
+    """Best-effort: fire ONE real x402 demo receipt after a successful booking and
+    store it as s["x402_receipt"]. Fully guarded and exception-safe — a payment
+    failure NEVER crashes the plan. Designed to run in a daemon thread: because it
+    executes AFTER the caller has already returned its response, it writes the
+    receipt through itself (db.set_session) rather than relying on the caller's
+    write. Guards (skip silently if any fails):
+      1. sid != "ORK-001"                                (never the frozen demo)
+      2. ENABLE_X402_DEMO_RECEIPT == exactly "true"
+      3. X402_DEMO_RECEIPT_SECRET set and non-empty
+      4. plan succeeded (s["plan"] set, booking_failed is not True)
+      5. no valid x402_receipt already stored              (don't double-fire)
+    """
+    try:
+        if sid == "ORK-001":
+            return
+        if not s.get("plan") or s.get("booking_failed") is True:
+            return
+        existing = s.get("x402_receipt")
+        if isinstance(existing, dict) and existing.get("txHash"):
+            return
+        from payments import x402_demo_receipt as XDR
+        if not XDR.is_demo_receipt_enabled():          # guard 2 (exact "true")
+            return
+        secret = os.environ.get("X402_DEMO_RECEIPT_SECRET", "").strip()
+        if not secret:                                 # guard 3
+            return
+        status_code, body = XDR.run_demo_receipt(secret, XDR.CONFIRM_PHRASE)
+        if status_code == 200 and isinstance(body, dict) and body.get("txHash"):
+            s["x402_receipt"] = body
+            # Runs after the caller's response/write — persist the receipt ourselves.
+            db.set_session(sid, s)
+        else:
+            LOGGER.warning("x402 auto-receipt not stored (status=%s) for %s", status_code, sid)
+    except Exception as e:
+        LOGGER.warning("x402 auto-receipt failed for %s: %s", sid, e)
+
+
 def generate_real_plan(sid):
     """Real-venue plan path for a non-seeded session — BYPASSES the convener.
 
@@ -239,6 +281,10 @@ def generate_real_plan(sid):
     s["venue_status"] = "real_search"
     s["phase"] = "plan_ready"
     db.set_session(sid, s)  # write-through AFTER mutation
+    # Non-blocking: fire one real x402 receipt in the background so the plan
+    # response returns immediately. The daemon thread persists the receipt itself
+    # (see _maybe_fire_x402_receipt); /public delivers it to the UI once it lands.
+    threading.Thread(target=_maybe_fire_x402_receipt, args=(s, sid), daemon=True).start()
     return plan
 
 
@@ -380,6 +426,10 @@ def compute_plan(sid):
                 "split": "even",
             })
     db.set_session(sid, s)  # write-through AFTER mutation (normal success)
+    # Non-blocking: fire one real x402 receipt in the background so the plan
+    # response returns immediately. The daemon thread persists the receipt itself
+    # (see _maybe_fire_x402_receipt); /public delivers it to the UI once it lands.
+    threading.Thread(target=_maybe_fire_x402_receipt, args=(s, sid), daemon=True).start()
     return s
 
 

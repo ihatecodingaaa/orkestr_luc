@@ -64,6 +64,15 @@ def _fallback_venues():
     } for v in _load_seed_venues()]
 
 
+def _clean_name(text):
+    """First segment of a Google Places displayName — drop '| …' and ', …' tails
+    (e.g. 'Saute san | City Square Mall | …' -> 'Saute san'). Preserves None."""
+    if not text:
+        return text
+    first = str(text).split("|")[0].split(",")[0].strip()
+    return first or str(text).strip()
+
+
 def _map_place(place):
     """One Places result -> frozen dict plus internal _rating/_photo_name keys.
 
@@ -80,7 +89,7 @@ def _map_place(place):
     photos = place.get("photos") or []
     photo_name = photos[0].get("name") if photos and isinstance(photos[0], dict) else None
     return {
-        "name": (place.get("displayName") or {}).get("text"),
+        "name": _clean_name((place.get("displayName") or {}).get("text")),
         "address": place.get("formattedAddress"),
         "lat": loc.get("latitude"),
         "lng": loc.get("longitude"),
