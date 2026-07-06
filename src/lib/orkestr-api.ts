@@ -172,6 +172,9 @@ export type PublicSession = {
   venue_status?: string | null;
   venue_verification?: (VenueVerification & { name?: string; address?: string }) | null;
   plan?: PublicPlan | null;
+  // Raw fresh x402 receipt auto-fired by the backend at booking time. Present only
+  // when a real on-chain receipt exists; run through toReceipt() to render it.
+  x402_receipt?: Dict | null;
 };
 
 export type LiveState = {

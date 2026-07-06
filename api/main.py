@@ -673,7 +673,7 @@ def session_public(sid: str):
             } if isinstance(pv, dict) else None,
         }
 
-    return {
+    resp = {
         "session_id": s.get("session_id"),
         "name": s.get("name"),
         "live": bool(s.get("live")),
@@ -691,6 +691,13 @@ def session_public(sid: str):
         "venue_verification": venue_verification,
         "plan": plan_summary,
     }
+    # Public fresh x402 receipt auto-fired at booking time (core.session
+    # _maybe_fire_x402_receipt). Additive: only present when a real receipt with a
+    # tx hash exists. Public chain fields only — no secrets. Reading NEVER spends.
+    receipt = s.get("x402_receipt")
+    if isinstance(receipt, dict) and receipt.get("txHash"):
+        resp["x402_receipt"] = receipt
+    return resp
 
 
 # ---- Real venue search: generate a plan from live Google Places results ----
