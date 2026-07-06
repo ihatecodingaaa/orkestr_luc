@@ -87,6 +87,41 @@ def new_live_session(name=None, date_range=None):
     return s
 
 
+def clone_session(sid, name=None, date_range=None):
+    """Clone a settled session's crew into a fresh live session for the next outing.
+
+    Copies ONLY the member id + name (+ avatar) list — NOT their constraints. A
+    returning member's constraints come from group memory when they re-submit, so
+    the crew is preserved but everyone plans fresh. The new session behaves like a
+    live session (empty constraints, ready=[]). ORK-001 is refused (frozen demo);
+    an unknown sid 404s. Returns the new session dict.
+    """
+    if sid == "ORK-001":
+        raise HTTPException(
+            status_code=400,
+            detail="ORK-001 is the frozen seeded demo; cloning is disabled for it")
+    src = db.get_session(sid)
+    if src is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    s = new_session(name or src.get("name"), date_range or src.get("date_range"))
+    shells = []
+    for m in src.get("members", []):
+        if not isinstance(m, dict) or not m.get("id"):
+            continue
+        shells.append({
+            "id": m["id"],
+            "name": m.get("name", m["id"]),
+            "avatar": m.get("avatar"),
+            "constraints": {},  # fresh plan — constraints come from group memory
+            "freeform": "",
+        })
+    s["members"] = shells
+    s["live"] = True
+    s["ready"] = []
+    db.set_session(s["session_id"], s)  # write-through AFTER mutation
+    return s
+
+
 def mark_ready(sid, person_id):
     """Record that one member pressed find-our-plan."""
     s = db.get_session(sid)
