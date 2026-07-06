@@ -407,6 +407,52 @@ def receipt_card(sid: str):
     s = _require_session(sid)
     ctx = _receipt_context(s)
     body = _receipt_card_body(ctx)
+
+    # Share controls (below the Basescan proof button): native share sheet, a
+    # WhatsApp fallback when navigator.share is unavailable, and copy-link. All
+    # self-contained inline HTML+JS — no CDN, no dependency. The share text carries
+    # the (raw, un-HTML-escaped) venue name, made JS-safe via json.dumps; the "</"
+    # replace prevents any "</script>" breakout from an odd venue name.
+    plan = s.get("plan") if isinstance(s.get("plan"), dict) else {}
+    venue = (plan.get("venue") or {}) if isinstance(plan, dict) else {}
+    raw_venue = venue.get("name") or plan.get("title") or "our spot"
+    title_js = json.dumps("Planned by Orkestr").replace("</", "<\\/")
+    text_js = json.dumps(
+        f"We just had dinner at {raw_venue} — planned in 90 seconds").replace("</", "<\\/")
+    _sbtn = ("box-sizing:border-box;min-height:44px;padding:14px 16px;text-align:center;"
+             "font-weight:600;border-radius:12px;font-size:15px;")
+    share_html = ("""      <div style="margin-top:16px;display:flex;flex-direction:column;gap:10px;">
+        <button id="ork-share" type="button" style="display:none;%(b)sborder:none;color:#fff;background:#111;cursor:pointer;">Share this receipt</button>
+        <a id="ork-wa" href="#" target="_blank" rel="noopener" style="display:none;%(b)stext-decoration:none;color:#fff;background:#25D366;">Share on WhatsApp</a>
+        <button id="ork-copy" type="button" style="%(b)sborder:1px solid #ddd;color:#111;background:#fff;cursor:pointer;">Copy link</button>
+      </div>
+      <script>
+(function(){
+  var shareTitle = %(title)s;
+  var shareText = %(text)s;
+  var url = window.location.href;
+  var shareBtn = document.getElementById('ork-share');
+  var waLink = document.getElementById('ork-wa');
+  var copyBtn = document.getElementById('ork-copy');
+  if (navigator.share) {
+    shareBtn.style.display = 'block';
+    shareBtn.addEventListener('click', function(){
+      navigator.share({ title: shareTitle, text: shareText, url: url }).catch(function(){});
+    });
+  } else {
+    waLink.style.display = 'block';
+    waLink.href = 'https://wa.me/?text=' + encodeURIComponent(shareText + ' ' + url);
+  }
+  copyBtn.addEventListener('click', function(){
+    var label = copyBtn.textContent;
+    var done = function(){ copyBtn.textContent = 'Copied!'; setTimeout(function(){ copyBtn.textContent = label; }, 1600); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(url).then(done).catch(done);
+    } else { done(); }
+  });
+})();
+      </script>""" % {"b": _sbtn, "title": title_js, "text": text_js})
+
     page = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -417,6 +463,7 @@ def receipt_card(sid: str):
 <body style="margin:0;padding:0;background:#f5f5f7;color:#111;-webkit-text-size-adjust:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
   <div style="width:480px;min-height:850px;position:relative;overflow:hidden;margin:0 auto;background:#fff;box-sizing:border-box;padding:24px 22px;">
 {body}
+{share_html}
       <div style="position:absolute;bottom:12px;right:16px;font-size:11px;color:#888;">Planned by Orkestr</div>
   </div>
 </body>

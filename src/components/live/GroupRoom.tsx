@@ -34,6 +34,7 @@ import {
 } from "@/lib/demo";
 import type { DemoGroup } from "@/lib/demo";
 import {
+  API_BASE,
   createLiveSession,
   getDemoReceiptStatus,
   getLatestReceipt,
@@ -280,6 +281,9 @@ export function GroupRoom({
   // Public, non-secret fresh-proof status — powers the Live readiness panel and
   // the "payment not run yet" copy. Reading it NEVER triggers a payment.
   const [freshStatus, setFreshStatus] = useState<DemoReceiptStatus | null>(null);
+  // "Plan another dinner with this crew": clone-in-progress + inline error state.
+  const [cloning, setCloning] = useState(false);
+  const [cloneError, setCloneError] = useState<string | null>(null);
 
   const submittedRef = useRef<Set<string>>(new Set());
   const startedRef = useRef(false);
@@ -632,6 +636,34 @@ export function GroupRoom({
     }
   }, []);
 
+  // "Friday coming up?" — clone THIS crew into a fresh session and jump to it.
+  // Copies only the member id+name list (constraints come from group memory when
+  // they re-submit). Never for ORK-001. On success we do a full navigation to the
+  // new room (page.tsx boots it from ?room=); on failure we surface a calm inline
+  // note and never crash the settled screen.
+  const planAnother = useCallback(async () => {
+    if (!sessionId || sessionId === "ORK-001" || cloning) return;
+    setCloning(true);
+    setCloneError(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/session/clone/${sessionId}`, {
+        method: "POST",
+        cache: "no-store",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      const data = (await res.json()) as { session_id?: string };
+      if (!data.session_id) throw new Error("clone returned no session_id");
+      // Full navigation to the fresh cloned room — no manual state reset needed.
+      window.location.href = presenterLink(data.session_id);
+    } catch (e) {
+      console.warn("[orkestr] could not clone session", e);
+      setCloneError("Couldn't start a new plan just now — try again in a moment.");
+      setCloning(false);
+    }
+  }, [sessionId, cloning]);
+
   // Make the blocking call feel alive: advance the visible step until data lands.
   useEffect(() => {
     if (!working) return;
@@ -887,6 +919,23 @@ export function GroupRoom({
                     source={splitSource}
                     showFallbackNote={splitFellBack}
                   />
+                  {/* Secondary, bottom-of-screen CTA — reuse this crew next time.
+                      Never for ORK-001 (the frozen seeded demo). */}
+                  {isLive && sessionId && sessionId !== "ORK-001" ? (
+                    <>
+                      <button
+                        type="button"
+                        className={s.btnGhost}
+                        onClick={() => void planAnother()}
+                        disabled={cloning}
+                      >
+                        {cloning
+                          ? "Setting up your next dinner…"
+                          : "Friday coming up? Plan another dinner with this crew →"}
+                      </button>
+                      {cloneError ? <p className={s.muted}>{cloneError}</p> : null}
+                    </>
+                  ) : null}
                 </>
               )}
             </div>
