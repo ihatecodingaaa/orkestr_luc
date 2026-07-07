@@ -236,6 +236,39 @@ export function computeSplit(input: ComputeInput, modeOverride?: SplitMode): Mea
   };
 }
 
+// Re-apply REAL per-member budgets (their stated budget_max) to an already-computed
+// split, recomputing over_budget / over_by / warning per person. Works regardless of
+// where the split came from (backend /api/split or the local demo calculator), so the
+// UI flags every member whose computed total exceeds their OWN stated budget — not a
+// hardcoded demo budget. A member absent from `budgets` (no real budget_max) has all
+// budget fields cleared, so we never raise a false "over budget" flag.
+export function applyMemberBudgets(
+  split: MealSplit,
+  budgets: Record<string, number>,
+): MealSplit {
+  const per_person: PerPerson[] = split.per_person.map((p) => {
+    const budget = budgets[p.member_id];
+    if (typeof budget !== "number" || !(budget > 0)) {
+      // No real budget for this member — strip any demo budget flags.
+      const { budget: _b, over_budget: _ob, over_by: _oby, warning: _w, ...rest } = p;
+      return rest;
+    }
+    const overBy = Math.round((p.total - budget) * 100) / 100;
+    if (overBy > 0) {
+      return {
+        ...p,
+        budget,
+        over_budget: true,
+        over_by: overBy,
+        warning: `Over ${p.name}'s $${budget.toFixed(0)} budget by $${overBy.toFixed(2)}`,
+      };
+    }
+    const { over_by: _oby, warning: _w, ...rest } = p;
+    return { ...rest, budget, over_budget: false };
+  });
+  return { ...split, per_person };
+}
+
 // ---- demo data (mirrors core/meal_split.py, so numbers match the backend) ----
 
 export const DEMO_SPLIT_MEMBERS: SplitMemberInput[] = [
