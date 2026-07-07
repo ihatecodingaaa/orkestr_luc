@@ -9,7 +9,6 @@ import { FinalPlanCard } from "./FinalPlanCard";
 import { PaymentProofCard } from "./PaymentProofCard";
 import { SmartSplitCard } from "./SmartSplitCard";
 import { TrustPanel } from "./TrustPanel";
-import { FreshProofPanel } from "./FreshProofPanel";
 import { MerchantAdapterCard } from "./MerchantAdapterCard";
 import { LiveReadinessPanel } from "./LiveReadinessPanel";
 import { LiveUnavailableCard } from "./LiveUnavailableCard";
@@ -56,6 +55,7 @@ import type {
   VenueVerification,
   X402Receipt,
 } from "@/lib/orkestr-api";
+import { applyMemberBudgets } from "@/lib/split";
 import type { SplitMode } from "@/lib/split";
 import { usePublicSession, useSplit } from "@/lib/useRoom";
 import {
@@ -708,10 +708,33 @@ export function GroupRoom({
   // A local-only room has no backend record, so we never ask /api/split for it.
   const splitLive = ENABLE_LIVE_PIPELINE && isLive && Boolean(sessionId) && !localRoom;
   const {
-    split,
+    split: rawSplit,
     source: splitSource,
     fellBack: splitFellBack,
   } = useSplit(sessionId, splitMode, { enabled: splitLive });
+
+  // Over-budget flags must compare each member's total against THEIR OWN stated
+  // budget_max — not a hardcoded demo budget. Build a real budgets-by-id map from
+  // the public snapshot (authoritative) with the locally-entered form as fallback,
+  // then re-apply it to whatever split we display (backend or local calculator).
+  // Only finite, > 0 budgets are included; missing/zero/NaN members are omitted so
+  // we never raise a false flag.
+  const memberBudgets = useMemo(() => {
+    const map: Record<string, number> = {};
+    const add = (id: string | undefined, raw: unknown) => {
+      if (!id || id in map) return;
+      const n = Number(raw);
+      if (Number.isFinite(n) && n > 0) map[id] = n;
+    };
+    (pub.data?.members ?? []).forEach((m) => add(m.id, m.constraints?.budget_max));
+    roomMembers.forEach((m) => add(m.id, forms[m.id]?.budget));
+    return map;
+  }, [pub.data, roomMembers, forms]);
+
+  const split = useMemo(
+    () => applyMemberBudgets(rawSplit, memberBudgets),
+    [rawSplit, memberBudgets],
+  );
 
   // When to show the "no verified restaurant" state instead of a plan:
   //  • Live Mode: whenever the final plan isn't a genuinely grounded venue.
@@ -912,6 +935,10 @@ export function GroupRoom({
                   />
                   <MerchantAdapterCard verification={displayPlan.venue?.verification} />
                   <PaymentProofCard receipt={activeReceipt} awaitingFreshProof={awaitingFreshProof} />
+                  <p className={s.muted}>
+                    0.001 USDC is a testnet proof-of-mechanism. In production, the full meal amount
+                    settles on-chain.
+                  </p>
                   <SmartSplitCard
                     split={split}
                     mode={splitMode}
@@ -919,6 +946,18 @@ export function GroupRoom({
                     source={splitSource}
                     showFallbackNote={splitFellBack}
                   />
+                  {/* Share the group-mandate receipt card (native share / WhatsApp /
+                      copy-link live inside that page). Same-origin via the API rewrite. */}
+                  {sessionId ? (
+                    <a
+                      className={s.btnGhost}
+                      href={`${API_BASE}/receipt/${sessionId}/card`}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      Share receipt ↗
+                    </a>
+                  ) : null}
                   {/* Secondary, bottom-of-screen CTA — reuse this crew next time.
                       Never for ORK-001 (the frozen seeded demo). */}
                   {isLive && sessionId && sessionId !== "ORK-001" ? (
@@ -956,8 +995,6 @@ export function GroupRoom({
           bookingMode={bookingMode}
         />
       ) : null}
-
-      {isLive && PRESENTER_TOOLS_VISIBLE ? <FreshProofPanel onFresh={setReceipt} /> : null}
 
       {isLive && PRESENTER_TOOLS_VISIBLE ? (
         <DemoControls
