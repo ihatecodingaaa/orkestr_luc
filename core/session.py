@@ -480,6 +480,42 @@ def compute_plan(sid):
                 "split": "even",
             })
     db.set_session(sid, s)  # write-through AFTER mutation (normal success)
+
+    # Post-selection budget hard cap (additive; never ORK-001, never crashes).
+    # If the negotiated venue is over the group's stated per-head budget, hand off
+    # to the budget-aware real search (ai/venue_search.py via generate_real_plan).
+    if sid != "ORK-001":
+        budgets = [b for m in (s.get("members") or []) if isinstance(m, dict)
+                   for b in [(m.get("constraints") or {}).get("budget_max")]
+                   if isinstance(b, (int, float)) and not isinstance(b, bool) and b > 0]
+        group_budget_max = min(budgets) if budgets else None
+        pp = (s.get("plan") or {}).get("per_person", 0)
+        if group_budget_max is not None and isinstance(pp, (int, float)) and pp > group_budget_max:
+            vname = ((s.get("plan") or {}).get("venue") or {}).get("name")
+            LOGGER.warning("compute_plan: venue %s at $%s/head exceeds group budget $%s "
+                           "— falling back to generate_real_plan", vname, pp, group_budget_max)
+            try:
+                generate_real_plan(sid)  # budget-aware; overwrites s["plan"] + persists + fires x402
+                fresh = db.get_session(sid)
+                new_plan = (fresh or {}).get("plan") or {}
+                new_name = (new_plan.get("venue") or {}).get("name", "unknown")
+                new_pp = new_plan.get("per_person", "?")
+                LOGGER.info("compute_plan budget guard: replaced with %s at $%s/head for %s",
+                            new_name, new_pp, sid)
+                # Stamp the fallback venue as verified so the UI shows "Google Places
+                # verified" instead of "no verified venue" (generate_real_plan omits
+                # the grounding block).
+                if fresh and fresh.get("plan") and fresh["plan"].get("venue"):
+                    v = fresh["plan"]["venue"]
+                    if not v.get("verification_status") or v.get("verification_status") == "unverified":
+                        v["verification_status"] = "verified"
+                        v["badge"] = "Google Places verified"
+                        db.set_session(sid, fresh)
+                return fresh
+            except Exception as e:
+                LOGGER.warning("compute_plan budget guard fallback failed for %s: %s "
+                               "— keeping original plan", sid, e)
+
     # Non-blocking: fire one real x402 receipt in the background so the plan
     # response returns immediately. The daemon thread persists the receipt itself
     # (see _maybe_fire_x402_receipt); /public delivers it to the UI once it lands.
