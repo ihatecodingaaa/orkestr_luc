@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import threading
+import time
 import uuid
 
 from fastapi import HTTPException
@@ -226,6 +227,24 @@ def _maybe_fire_x402_receipt(s, sid):
         if not secret:                                 # guard 3
             return
         status_code, body = XDR.run_demo_receipt(secret, XDR.CONFIRM_PHRASE)
+        # 429 = cooldown active (a prior session just fired). We are in a daemon
+        # thread AFTER the response was sent, so we can wait out the cooldown and
+        # retry ONCE — this makes back-to-back sessions each get a real receipt
+        # without weakening the cooldown protection itself.
+        if status_code == 429:
+            remaining = body.get("cooldown_remaining_seconds") if isinstance(body, dict) else None
+            if isinstance(remaining, (int, float)) and not isinstance(remaining, bool):
+                if remaining > 59:  # guard: never sleep longer than ~a minute
+                    LOGGER.warning("x402 auto-receipt: cooldown %ss too long, skipping for %s",
+                                   remaining, sid)
+                    return
+                wait = int(remaining) + 1
+            else:
+                wait = 35  # cooldown_remaining not provided — fixed safe fallback
+            LOGGER.info("x402 auto-receipt: cooldown active, retrying once in %ss for %s",
+                        wait, sid)
+            time.sleep(wait)
+            status_code, body = XDR.run_demo_receipt(secret, XDR.CONFIRM_PHRASE)  # retry ONCE
         if status_code == 200 and isinstance(body, dict) and body.get("txHash"):
             s["x402_receipt"] = body
             # Runs after the caller's response/write — persist the receipt ourselves.
