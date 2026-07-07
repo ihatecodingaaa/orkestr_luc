@@ -31,7 +31,7 @@ function LiveApp() {
   // Presenter command center bound to a shared room id (refresh / link-safe).
   if (room) {
     return (
-      <GroupRoom group={DEMO_GROUPS[0]} boundRoomId={room} onBack={() => router.push("/")} />
+      <GroupRoom group={DEMO_GROUPS[0]} boundRoomId={room} onBack={() => router.replace("/")} />
     );
   }
 
