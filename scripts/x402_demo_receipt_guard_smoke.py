@@ -223,7 +223,17 @@ check("real signer tripwire NOT reached", _TRIP["count"] == 0, f"trip={_TRIP['co
 check("receipt source=fresh_demo_receipt", body.get("source") == "fresh_demo_receipt", str(body.get("source")))
 check("receipt label=Fresh x402 testnet receipt",
       body.get("label") == "Fresh x402 testnet receipt", str(body.get("label")))
-check("receipt payment_mode=x402_real", body.get("payment_mode") == "x402_real", str(body.get("payment_mode")))
+# The /run ROUTE normalizes the upstream raw mode to the judge-facing PUBLIC
+# contract: "x402_real" -> "live" (else "mock"), and additively surfaces the raw tx
+# as real_tx_hash/explorer_url. The frontend depends on this normalized value, so
+# pin the public contract here; the raw module value ("x402_real") is pinned
+# separately in the module-level check just below section 4.
+check("route: public payment_mode=live (normalized from x402_real)",
+      body.get("payment_mode") == "live", str(body.get("payment_mode")))
+check("route: real_tx_hash surfaced (raw tx preserved additively)",
+      body.get("real_tx_hash") == FAKE_TX
+      and str(body.get("explorer_url", "")).endswith(FAKE_TX),
+      f"real_tx_hash={body.get('real_tx_hash')} explorer_url={body.get('explorer_url')}")
 check("receipt amount=1000 / 0.001 USDC",
       body.get("amount") == 1000 and body.get("amount_display") == "0.001 USDC",
       f"{body.get('amount')}/{body.get('amount_display')}")
@@ -239,10 +249,22 @@ check("200 receipt leaks no secret-ish fields", clean, f"offending={bad}")
 check("200 receipt does not echo the private key material (no long hex secret keys)",
       "evm_private_key" not in r.text.lower(), "unexpected key material")
 
+# Module-layer contract: the upstream orchestrator returns the RAW payment_mode
+# ("x402_real"), which the route above normalizes to the public "live". Pin the raw
+# value directly so BOTH layers are covered and neither can silently drift. reset()
+# clears cooldown/in-flight first; this successful run re-arms the 60s cooldown that
+# section 5 relies on and leaves the seam count at exactly 1.
+reset()
+_mstatus, _mbody = XDR.run_demo_receipt(TEST_SECRET, CONFIRM)
+check("module: run_demo_receipt returns raw payment_mode=x402_real",
+      _mstatus == 200 and _mbody.get("payment_mode") == "x402_real", str(_mbody.get("payment_mode")))
+_mclean, _mbad = no_forbidden(_mbody)
+check("module: raw receipt leaks nothing", _mclean, f"offending={_mbad}")
+
 # ---------------------------------------------------------------------------
 section("5. COOLDOWN -> second call 429, never re-spends")
 # ---------------------------------------------------------------------------
-# (cooldown 60s is still active from the case-4 success)
+# (cooldown 60s is still active from the module-layer success just above)
 r = client.post("/api/x402/demo-receipt/run", json={"confirm": CONFIRM}, headers=HDR)
 check("second run within cooldown -> 429", r.status_code == 429, f"got {r.status_code}")
 check("429 carries cooldown_remaining_seconds",

@@ -908,7 +908,23 @@ def discovery_venues(body: dict = Body(default={})):
 
 
 @app.post("/api/dev/reseed")
-def dev_reseed():
+def dev_reseed(x_reseed_secret: str = Header(default=None, alias="X-Orkestr-Reseed-Secret")):
+    """Restore ORK-001 to its frozen seeded values. Gated exactly like the x402
+    demo endpoints so it is not a public unauthenticated reset in production:
+      1. ENABLE_DEV_RESEED must be exactly "true"       -> else 404 (hidden)
+      2. X-Orkestr-Reseed-Secret must equal DEV_RESEED_SECRET (constant-time) -> else 403
+    The secret is never logged or echoed.
+    """
+    import hmac
+
+    if os.environ.get("ENABLE_DEV_RESEED", "").strip() != "true":
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    expected = os.environ.get("DEV_RESEED_SECRET", "").strip()
+    provided = (x_reseed_secret or "").strip()
+    if not expected or not hmac.compare_digest(provided, expected):
+        raise HTTPException(status_code=403, detail="forbidden")
+
     S.delete_session("ORK-001")  # drop from cache + SQLite, then re-seed fresh
     S.seed_demo()
     return {"ok": True}

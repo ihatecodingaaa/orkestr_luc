@@ -60,10 +60,17 @@ def get_session(sid):
 
 
 def set_session(sid, data):
-    """Write-through: update the cache and persist the JSON blob to SQLite."""
-    blob = json.dumps(data)
+    """Write-through: update the cache and persist the JSON blob to SQLite.
+
+    json.dumps runs INSIDE _LOCK so the serialization is a stable snapshot: a
+    concurrent set_session on the same session can't mutate the shared cached dict
+    mid-dump and raise "dictionary changed size during iteration". Callers in
+    core.session serialize their pipeline writes with the per-sid compute lock, so
+    the only cross-thread contention on one session's dict is here — under _LOCK.
+    """
     _CACHE[sid] = data
     with _LOCK:
+        blob = json.dumps(data)
         _CONN.execute(
             "INSERT OR REPLACE INTO sessions (id, data) VALUES (?, ?)", (sid, blob))
         _CONN.commit()

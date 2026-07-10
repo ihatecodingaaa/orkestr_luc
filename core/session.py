@@ -18,6 +18,7 @@ from fastapi import HTTPException
 from agents.convener import (generate_candidates, run_negotiation, strike_booking,
                              _seeded_messages)
 from core import db
+from core.meal_split import _money, _to_cents, allocate_cents
 from core.settlement import compute_net, simplify
 from payments.x402 import stamp
 
@@ -25,6 +26,39 @@ DATA = os.path.join(os.path.dirname(__file__), "..", "data")
 PHASES = ["negotiating", "plan_ready", "booking", "confirmed"]
 
 LOGGER = logging.getLogger(__name__)
+
+# Per-session compute locks. compute_plan runs the negotiation/booking pipeline
+# and spawns the x402 receipt daemon; without a lock two devices/tabs hitting the
+# same room could compute twice and double-spawn. The registry itself is guarded
+# by a meta-lock (double-checked creation) so the lock objects are process-stable.
+_COMPUTE_LOCKS = {}
+_COMPUTE_LOCKS_META = threading.Lock()
+
+
+def _compute_lock(sid):
+    """Return the process-stable threading.Lock for this session id."""
+    with _COMPUTE_LOCKS_META:
+        lock = _COMPUTE_LOCKS.get(sid)
+        if lock is None:
+            lock = threading.Lock()
+            _COMPUTE_LOCKS[sid] = lock
+        return lock
+
+
+def _spawn_x402_receipt_once(s, sid):
+    """Spawn the x402 receipt daemon AT MOST ONCE per session.
+
+    Check-and-set on a persisted `_x402_fired` flag (set under the per-sid compute
+    lock at every call site inside compute_plan) so concurrent triggers — or the
+    budget-guard path that runs generate_real_plan and then falls through — can
+    never spawn two receipt daemons for one session. _maybe_fire_x402_receipt keeps
+    its own guards too (ORK-001 skip, existing-receipt skip); this is the outer belt.
+    """
+    if s.get("_x402_fired"):
+        return
+    s["_x402_fired"] = True
+    db.set_session(sid, s)  # persist the flag before spawning
+    threading.Thread(target=_maybe_fire_x402_receipt, args=(s, sid), daemon=True).start()
 
 
 def _load(name):
@@ -338,7 +372,7 @@ def generate_real_plan(sid):
     # Non-blocking: fire one real x402 receipt in the background so the plan
     # response returns immediately. The daemon thread persists the receipt itself
     # (see _maybe_fire_x402_receipt); /public delivers it to the UI once it lands.
-    threading.Thread(target=_maybe_fire_x402_receipt, args=(s, sid), daemon=True).start()
+    _spawn_x402_receipt_once(s, sid)
     return plan
 
 
@@ -361,7 +395,27 @@ def _no_verified_venue(s):
 
 
 def compute_plan(sid):
-    """Negotiation -> plan -> venue handshake. Moves phase to plan_ready."""
+    """Negotiation -> plan -> venue handshake. Moves phase to plan_ready.
+
+    Serialized per session: two concurrent callers (two devices/tabs polling the
+    same room) can't run the pipeline twice or double-spawn the receipt daemon.
+    The second caller waits on the lock, then no-ops if a plan already landed.
+    """
+    s = db.get_session(sid)
+    if s is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    with _compute_lock(sid):
+        # Re-read under the lock: another caller may have computed while we waited.
+        s = db.get_session(sid)
+        if s is None:
+            raise HTTPException(status_code=404, detail="session not found")
+        if s.get("plan") and s.get("phase") in ("plan_ready", "booking", "confirmed"):
+            return s
+        return _compute_plan_body(sid)
+
+
+def _compute_plan_body(sid):
+    """The actual compute pipeline. Always called while holding _compute_lock(sid)."""
     s = db.get_session(sid)
     if s is None:
         raise HTTPException(status_code=404, detail="session not found")
@@ -455,6 +509,29 @@ def compute_plan(sid):
     from payments.x402_protocol import is_live_real_x402_enabled
     allow_x402 = bool(s.get("live")) and is_live_real_x402_enabled()
     booking = strike_booking(s["plan"], allow_x402=allow_x402)
+
+    # AP2 tamper gate (P0.4): before ANY handshake-success state is written and
+    # before the x402 receipt daemon can spawn, verify the co-signed mandate's cart
+    # digest. strike_booking's normal ACP path returns a co-signed mandate WITHOUT a
+    # cart_digest, so we bind one now from the mandate's own items (cosign computes
+    # the same SHA-256). A mandate that ALREADY carries a digest is left untouched —
+    # so a cart altered after signing (digest no longer matches items) fails verify()
+    # and the booking is refused with no payment. Non-co-signed mandates (e.g. an
+    # x402 controlled-failure) are a different failure mode and skip this gate.
+    from payments.mandate import cosign, verify
+    mandate = booking["mandate"]
+    if mandate.get("status") == "co-signed":
+        if not mandate.get("cart_digest"):
+            mandate["cart_digest"] = cosign(
+                mandate, mandate.get("merchant", "unknown"))["cart_digest"]
+        if not verify(mandate):
+            s["handshake"] = None
+            s["booking_failed"] = True
+            s["fail_reason"] = "mandate integrity check failed"
+            s["phase"] = "failed"
+            db.set_session(sid, s)  # write-through (tamper block; no receipt fires)
+            return s
+
     s["handshake"] = {
         "request": booking["request"],
         "response": booking["response"],
@@ -519,7 +596,7 @@ def compute_plan(sid):
     # Non-blocking: fire one real x402 receipt in the background so the plan
     # response returns immediately. The daemon thread persists the receipt itself
     # (see _maybe_fire_x402_receipt); /public delivers it to the UI once it lands.
-    threading.Thread(target=_maybe_fire_x402_receipt, args=(s, sid), daemon=True).start()
+    _spawn_x402_receipt_once(s, sid)
     return s
 
 
@@ -566,24 +643,35 @@ def recompute_settlement(sid):
     if s is None:
         raise HTTPException(status_code=404, detail="session not found")
     ids = [m["id"] for m in _members(s)]
+    # All settlement math runs in INTEGER CENTS so no penny leaks in rounding
+    # (the old `per = round(total/len(ids))` dropped the remainder — $401/5 lost
+    # $1). We convert to cents at the boundary, distribute the equal share with the
+    # cent-exact largest-remainder allocator from core.meal_split, run the untouched
+    # compute_net/simplify on those ints (their `== 0` checks are then exact), and
+    # convert back to dollars only for the stored response.
     if s.get("_fronted_override"):
-        fronted = {pid: s["_fronted_override"].get(pid, 0) for pid in ids}
+        fronted_cents = {pid: _to_cents(s["_fronted_override"].get(pid, 0)) for pid in ids}
     else:
-        fronted = {pid: 0 for pid in ids}
+        fronted_cents = {pid: 0 for pid in ids}
         for e in s["expenses"]:
-            fronted[e["paid_by"]] = fronted.get(e["paid_by"], 0) + e["amount"]
-    total = sum(fronted.values())
-    per = round(total / len(ids)) if ids else 0
-    shares = {pid: per for pid in ids}
-    net = compute_net(fronted, shares)
+            fronted_cents[e["paid_by"]] = fronted_cents.get(e["paid_by"], 0) + _to_cents(e["amount"])
+    total_cents = sum(fronted_cents.values())
+    # Equal share, distributed by largest remainder over members ordered by id
+    # ascending (deterministic tie-break). sum(shares) == total_cents EXACTLY.
+    order = sorted(ids)
+    share_list = allocate_cents([1] * len(order), total_cents) if order else []
+    share_by_id = {pid: share_list[i] for i, pid in enumerate(order)}
+    shares_cents = {pid: share_by_id.get(pid, 0) for pid in ids}
+    net_cents = compute_net(fronted_cents, shares_cents)  # ints -> sums to exactly 0
     transfers = [
-        {**t, "rail": "x402", "status": "pending", "tx_hash": None, "latency_ms": 1000}
-        for t in simplify(net)
+        {**t, "amount": _money(t["amount"]), "rail": "x402", "status": "pending",
+         "tx_hash": None, "latency_ms": 1000}
+        for t in simplify(net_cents)  # greedy min-cash-flow on integer cents
     ]
     s["settlement"] = {
-        "fronted": fronted,
-        "shares": shares,
-        "net": net,
+        "fronted": {pid: _money(fronted_cents[pid]) for pid in ids},
+        "shares": {pid: _money(shares_cents[pid]) for pid in ids},
+        "net": {pid: _money(net_cents.get(pid, 0)) for pid in ids},
         "transfers": transfers,
         "net_after": {pid: 0 for pid in ids},
     }
@@ -652,6 +740,15 @@ def seed_demo():
         "conflicts": [],
     }
     booking = strike_booking(seeded_plan)
+    # Back-cosign the seeded mandate (P0.4): strike_booking's ACP path omits the
+    # cart_digest, so bind one now from its own items. ORK-001 then genuinely passes
+    # mandate.verify() and displays co-signed + verified. Additive only — Seoul
+    # Garden / per_person 80 / booking_ref / status "co-signed" are all unchanged.
+    from payments.mandate import cosign as _cosign
+    _seeded_mandate = booking["mandate"]
+    if _seeded_mandate.get("status") == "co-signed" and not _seeded_mandate.get("cart_digest"):
+        _seeded_mandate["cart_digest"] = _cosign(
+            _seeded_mandate, _seeded_mandate.get("merchant", "Seoul Garden"))["cart_digest"]
     s["negotiation"] = _seeded_messages()
     s["plan"] = seeded_plan
     # Grade the seeded venue as a labeled sample (demo). Additive — keeps the
