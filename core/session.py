@@ -692,6 +692,142 @@ def approve_transfer(sid, person_id):
     return s
 
 
+# ---------------------------------------------------------------------------
+# Session-linked meal split (P1.3). The Orkestr agent wallet pays the merchant
+# ONCE over x402; this computes the internal per-person settlement from THIS
+# room's members + orders. Pure math (core.meal_split) — never a payment, never
+# the pipeline. Distinct from recompute_settlement (which nets whole expenses).
+# ---------------------------------------------------------------------------
+
+# A small realistic menu the session DRAFT draws from, rotated per session so two
+# different rooms get different draft orders (never one global canned split).
+_DRAFT_MENU = [
+    ("Bibimbap", 18.0),
+    ("Bulgogi set", 24.0),
+    ("Japchae (v)", 16.0),
+    ("Soft tofu stew", 15.0),
+    ("Kimchi fried rice", 14.0),
+    ("Seafood pancake", 20.0),
+    ("Spicy ramen", 17.0),
+    ("Bibim naengmyeon", 16.5),
+]
+_DRAFT_SHARED = ("Table BBQ platter", 60.0)
+_DRAFT_SIDE = ("Kimchi & banchan", 12.0)
+
+
+def _split_members(s):
+    """meal_split member rows from the session's members (+ their stated budget)."""
+    rows = []
+    for m in _members(s):
+        if not isinstance(m, dict) or not m.get("id"):
+            continue
+        c = m.get("constraints") or {}
+        b = c.get("budget_max")
+        row = {"member_id": m["id"], "name": m.get("name", m["id"])}
+        if isinstance(b, (int, float)) and not isinstance(b, bool) and b > 0:
+            row["budget"] = float(b)
+        rows.append(row)
+    return rows
+
+
+def _draft_orders(s):
+    """A realistic, session-linked DRAFT order tied to THIS room's members.
+
+    Each member gets one personal main (chosen by a per-session rotation so two
+    different rooms differ), and everyone shares a BBQ platter + banchan. Stored on
+    the session so it is stable + editable — never a detached global canned split.
+    """
+    import zlib
+
+    ids = [m["member_id"] for m in _split_members(s)]
+    if not ids:
+        return []
+    rot = zlib.crc32((s.get("session_id") or "").encode()) % len(_DRAFT_MENU)
+    items = []
+    for i, mid in enumerate(ids):
+        name, price = _DRAFT_MENU[(rot + i) % len(_DRAFT_MENU)]
+        items.append({
+            "id": f"draft-main-{mid}", "name": name, "price": price, "quantity": 1,
+            "assigned_to": [mid], "shared_by": [], "category": "personal",
+        })
+    sname, sprice = _DRAFT_SHARED
+    items.append({
+        "id": "draft-shared-platter", "name": sname, "price": sprice, "quantity": 1,
+        "assigned_to": [], "shared_by": list(ids), "category": "shared",
+    })
+    bname, bprice = _DRAFT_SIDE
+    items.append({
+        "id": "draft-shared-banchan", "name": bname, "price": bprice, "quantity": 1,
+        "assigned_to": [], "shared_by": list(ids), "category": "shared",
+    })
+    return items
+
+
+def get_session_split(sid, mode="itemized"):
+    """Compute the itemized split for THIS session. Returns (split_dict, source).
+
+    Real captured orders -> "backend_live_orders". Otherwise a session-linked draft
+    is initialised (stored on the session) and used -> "backend_session_draft".
+    Pure math — never runs the pipeline or a payment.
+    """
+    from core.meal_split import compute_split
+
+    s = db.get_session(sid)
+    if s is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    orders = s.get("orders")
+    if isinstance(orders, list) and orders and not s.get("orders_are_draft"):
+        source = "backend_live_orders"
+    else:
+        if not (isinstance(orders, list) and orders):
+            orders = _draft_orders(s)
+            s["orders"] = orders
+            s["orders_are_draft"] = True
+            db.set_session(sid, s)  # persist the draft so it is stable + editable
+        source = "backend_session_draft"
+    split = compute_split({"members": _split_members(s), "items": orders, "mode": mode}, mode=mode)
+    split["split_source"] = source
+    return split, source
+
+
+def set_session_orders(sid, items, mode="itemized"):
+    """Replace the session's orders with an explicit (edited/captured) order set and
+    return the recomputed split. Validates item members; marks orders as real (not a
+    draft) so subsequent splits report "backend_live_orders". Never a payment."""
+    from core.meal_split import compute_split
+
+    s = db.get_session(sid)
+    if s is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    member_ids = {m["member_id"] for m in _split_members(s)}
+    clean = []
+    for it in (items or []):
+        if not isinstance(it, dict):
+            raise HTTPException(status_code=400, detail="each item must be an object")
+        assigned = [p for p in (it.get("assigned_to") or []) if p in member_ids]
+        shared = [p for p in (it.get("shared_by") or []) if p in member_ids]
+        try:
+            price = float(it.get("price", 0))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="item price must be numeric")
+        category = "shared" if (it.get("category") == "shared" or (shared and not assigned)) else "personal"
+        clean.append({
+            "id": str(it.get("id") or f"item-{len(clean) + 1}"),
+            "name": str(it.get("name") or "Item"),
+            "price": price,
+            "quantity": int(it.get("quantity") or 1),
+            "assigned_to": assigned,
+            "shared_by": shared,
+            "category": category,
+        })
+    s["orders"] = clean
+    s["orders_are_draft"] = False
+    db.set_session(sid, s)  # write-through AFTER mutation
+    split = compute_split({"members": _split_members(s), "items": clean, "mode": mode}, mode=mode)
+    split["split_source"] = "backend_live_orders"
+    return split, "backend_live_orders"
+
+
 def seed_demo():
     """Pre-populate ORK-001 so the app is fully populated on boot.
 

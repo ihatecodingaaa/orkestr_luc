@@ -12,6 +12,7 @@ import { TrustPanel } from "./TrustPanel";
 import { MerchantAdapterCard } from "./MerchantAdapterCard";
 import { LiveReadinessPanel } from "./LiveReadinessPanel";
 import { LiveUnavailableCard } from "./LiveUnavailableCard";
+import { LiveFailureCard } from "./LiveFailureCard";
 import { NoVerifiedVenueCard } from "./verification";
 import { DemoControls } from "./DemoControls";
 import type { DemoFriend, DemoSection } from "./DemoControls";
@@ -256,6 +257,10 @@ export function GroupRoom({
   const [working, setWorking] = useState(false);
   const [timelineStep, setTimelineStep] = useState(0);
   const [revealed, setRevealed] = useState(!isLive);
+  // After a failure, returning to the room to edit constraints must NOT let the
+  // auto-run effect immediately recompute the SAME failing constraints in a loop.
+  // Set true when the presenter goes back to edit; cleared on the next submit/retry.
+  const [suppressAutoRun, setSuppressAutoRun] = useState(false);
   // Soft, demo-safe sync state — we never surface raw backend errors to the UI.
   // Real errors still go to the console (see usePublicSession + the catches).
   const [syncWarn, setSyncWarn] = useState(false);
@@ -455,6 +460,9 @@ export function GroupRoom({
     async (member: Member, override?: Constraints) => {
       const c = override ?? forms[member.id];
       if (!c || !isReadyToSubmit(c)) return;
+      // A fresh submit means constraints may have changed — re-enable auto-run so a
+      // post-failure edit can recompute once everyone is ready again.
+      setSuppressAutoRun(false);
       setSubmitting((p) => ({ ...p, [member.id]: true }));
       if (override) setForms((p) => ({ ...p, [member.id]: c }));
       try {
@@ -485,11 +493,11 @@ export function GroupRoom({
   // their phone arrives via polling), so this reacts in an effect — deferred off
   // the synchronous effect body, and guarded by startedRef against re-entry.
   useEffect(() => {
-    if (!isLive || !sessionId || startedRef.current) return;
+    if (!isLive || !sessionId || startedRef.current || suppressAutoRun) return;
     if (roomMembers.length === 0 || readyIds.length < roomMembers.length) return;
     const t = window.setTimeout(() => void runPipeline(sessionId), 0);
     return () => window.clearTimeout(t);
-  }, [isLive, sessionId, roomMembers.length, readyIds.length, runPipeline]);
+  }, [isLive, sessionId, roomMembers.length, readyIds.length, runPipeline, suppressAutoRun]);
 
   const editMember = useCallback((id: string) => {
     setSubmitted((p) => ({ ...p, [id]: false }));
@@ -585,6 +593,31 @@ export function GroupRoom({
     setTimelineStep(TIMELINE_STEPS.length);
     setRevealed(true);
   }, [seedAllReady]);
+
+  // Failure recovery (P1.2). "Try again" re-runs the pipeline with the current
+  // constraints; the backend recomputes and either succeeds or fails again cleanly.
+  const retryPlan = useCallback(() => {
+    if (!sessionId) return;
+    setSuppressAutoRun(false);
+    setState(null);
+    setRevealed(false);
+    setWorking(false);
+    setTimelineStep(0);
+    startedRef.current = false;
+    void runPipeline(sessionId);
+  }, [sessionId, runPipeline]);
+
+  // "Edit constraints" / "Relax" / "Back to waiting" return to the editable room.
+  // suppressAutoRun stops the readiness effect from instantly recomputing the same
+  // failing constraints; it clears the moment a member re-submits (see submitMember).
+  const backToRoom = useCallback(() => {
+    setSuppressAutoRun(true);
+    setState(null);
+    setRevealed(false);
+    setWorking(false);
+    setTimelineStep(0);
+    startedRef.current = false;
+  }, []);
 
   const resetDemo = useCallback(async () => {
     setBusy(true);
@@ -745,6 +778,18 @@ export function GroupRoom({
       ? stage === "final" && !isRealVenue(displayPlan)
       : venueStatus === "no_verified_venue"
   );
+
+  // A genuine backend failure (quorum couldn't agree / no verified venue / mandate
+  // integrity block). When true we show the polished failure state instead of a
+  // plan — in live mode NEVER a sample venue and NEVER a stale payment proof.
+  const failed = Boolean(
+    state?.phase === "failed" ||
+      state?.bookingFailed ||
+      state?.failReason ||
+      pub.data?.phase === "failed" ||
+      pub.data?.booking_failed,
+  );
+  const failReason = state?.failReason ?? pub.data?.fail_reason ?? null;
 
   const planVerification = displayPlan?.venue?.verification;
   const bookingMode = bookingModeLabel(planVerification);
@@ -921,7 +966,17 @@ export function GroupRoom({
 
           {stage === "final" ? (
             <div className={s.finalStack}>
-              {noVenue || !displayPlan ? (
+              {failed ? (
+                <LiveFailureCard
+                  failReason={failReason}
+                  venueStatus={venueStatus}
+                  onEditConstraints={backToRoom}
+                  onRetry={retryPlan}
+                  onRelax={backToRoom}
+                  onBackToWaiting={backToRoom}
+                  showTechnical={PRESENTER_TOOLS_VISIBLE}
+                />
+              ) : noVenue || !displayPlan ? (
                 <NoVerifiedVenueCard />
               ) : (
                 <>

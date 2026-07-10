@@ -2,16 +2,17 @@
 
 import { useState } from "react";
 import { Avatar } from "./primitives";
-import { fmtMoney } from "@/lib/split";
+import { fmtMoney, splitSourceLabel } from "@/lib/split";
 import type { MealSplit, SplitMode } from "@/lib/split";
 import type { SplitSource } from "@/lib/useRoom";
 import s from "./live.module.css";
 
-// Subtle source-of-truth label. Backend split = the real deal; local = demo fallback.
-function SplitSourceBadge({ source }: { source: SplitSource }) {
+// Subtle source-of-truth label. Honest per split_source: real backend orders,
+// a session draft, or the local demo preview (never labels canned data as real).
+function SplitSourceBadge({ split, source }: { split: MealSplit; source: SplitSource }) {
   return (
     <span className={s.splitSourceBadge} data-source={source}>
-      {source === "backend" ? "Calculated by Orkestr backend" : "Demo split preview"}
+      {splitSourceLabel(split, source)}
     </span>
   );
 }
@@ -52,7 +53,7 @@ export function SmartSplitCard({
         <div>
           <span className={s.stageKicker}>After the meal</span>
           <h3 className={s.splitTitle}>Smart itemized split</h3>
-          <SplitSourceBadge source={source} />
+          <SplitSourceBadge split={split} source={source} />
         </div>
         <span className={s.splitTotal}>{fmtMoney(split.total)} total</span>
       </div>

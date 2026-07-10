@@ -6,6 +6,7 @@ import { AgentTimeline } from "./AgentTimeline";
 import { FinalPlanCard } from "./FinalPlanCard";
 import { PaymentProofCard } from "./PaymentProofCard";
 import { ParticipantSplitCard } from "./ParticipantSplitCard";
+import { LiveFailureCard } from "./LiveFailureCard";
 import { NoVerifiedVenueCard } from "./verification";
 import {
   COPY,
@@ -156,6 +157,10 @@ export function ParticipantView({ roomId, memberId }: { roomId: string; memberId
   // venue); Demo Mode keeps the sample so the phone always renders a plan.
   const realPlan: Plan | null = data?.plan ? (data.plan as unknown as Plan) : null;
   const displayPlan: Plan | null = IS_LIVE_MODE ? realPlan : DEMO_PLAN;
+  // Live-mode failure: the room could not complete. Show the calm failure state
+  // (no sample venue, no stale receipt) instead of a plan on the participant phone.
+  const failed = IS_LIVE_MODE && Boolean(data?.phase === "failed" || data?.booking_failed);
+  const failReason = data?.fail_reason ?? null;
   const noVenue = IS_LIVE_MODE && !isRealVenue(displayPlan);
   const awaitingFreshProof = IS_LIVE_MODE && !receipt.isFresh;
 
@@ -348,7 +353,9 @@ export function ParticipantView({ roomId, memberId }: { roomId: string; memberId
 
       {stage === "final" ? (
         <section className={s.phoneStage} aria-label="Your plan">
-          {noVenue || !displayPlan ? (
+          {failed ? (
+            <LiveFailureCard failReason={failReason} venueStatus={data?.venue_status ?? null} />
+          ) : noVenue || !displayPlan ? (
             <NoVerifiedVenueCard />
           ) : (
             <>

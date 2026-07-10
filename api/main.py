@@ -47,6 +47,28 @@ def _require_field(body: dict, field: str) -> None:
         raise HTTPException(status_code=400, detail=f"{field} required")
 
 
+def _not_ready(s: dict) -> JSONResponse:
+    """409 body for a read endpoint whose plan hasn't been computed yet (P1.1).
+
+    The plan/negotiation/handshake GETs are PURE READS — they never run the
+    pipeline. /api/status is the single controlled compute gate, so a direct GET or
+    a browser refresh can never advance an unready live room. fail_reason is echoed
+    when the room failed so the caller can render a failure state without a second
+    round-trip; it is already public (also on /api/status and /public)."""
+    ready = s.get("ready", []) or []
+    body = {
+        "status": "not_ready",
+        "phase": s.get("phase"),
+        "ready_count": len(ready),
+        "members_total": len(s.get("members", []) or []),
+        "message": "Plan is not ready yet.",
+    }
+    if s.get("phase") == "failed":
+        body["booking_failed"] = bool(s.get("booking_failed"))
+        body["fail_reason"] = s.get("fail_reason")
+    return JSONResponse(status_code=409, content=body)
+
+
 @app.on_event("startup")
 def _startup():
     S.seed_demo()
@@ -533,19 +555,28 @@ def demo_tamper_check(payload: dict = Body(default=None)):
 @app.post("/api/session/start")
 def session_start(payload: dict = Body(default={})):
     s = S.new_session(payload.get("name"), payload.get("date_range"))
-    return {"session_id": s["session_id"],
-            "invite_url": f"https://orkestr.app/join/{s['session_id']}"}
+    invite_url, _ = _invite_and_qr(s["session_id"])  # single helper (P1.4)
+    return {"session_id": s["session_id"], "invite_url": invite_url}
 
 
 # ---- QR join: a scannable invite that turns a judge's phone into a live node ----
 # No dependency/library: the QR image is rendered by api.qrserver.com. The
 # invite_url matches the format returned by /api/session/start above.
+def _frontend_base() -> str:
+    """The configured frontend origin (no trailing slash). Defaults to the real
+    Vercel domain — NEVER the dead orkestr.app placeholder (P1.4)."""
+    return os.environ.get("FRONTEND_URL", "https://orkestr-luc.vercel.app").rstrip("/")
+
+
 def _invite_and_qr(sid: str):
-    """Return (invite_url, qr_url) for a session id. qr_url is a ready-to-embed
-    api.qrserver.com PNG encoding the invite_url (URL-encoded into the data param)."""
+    """Return (invite_url, qr_url) for a session id — the SINGLE source of truth for
+    every invite link (start, live, invite, QR, clone). The invite URL uses the
+    real app's query-param route (`/?room=<sid>`), matching the frontend router and
+    presenterLink(); the old `/join/<sid>` path had no page. qr_url is a
+    ready-to-embed api.qrserver.com PNG encoding the invite_url."""
     from urllib.parse import quote
 
-    invite_url = f"{os.environ.get('FRONTEND_URL', 'https://orkestr-luc.vercel.app')}/join/{sid}"
+    invite_url = f"{_frontend_base()}/?room={quote(sid, safe='')}"
     qr_url = ("https://api.qrserver.com/v1/create-qr-code/?data="
               + quote(invite_url, safe="") + "&size=300x300&format=png")
     return invite_url, qr_url
@@ -577,9 +608,10 @@ def session_live(payload: dict = Body(default={})):
     live and presses find-our-plan. The pipeline runs only once all 5 are ready.
     """
     s = S.new_live_session(payload.get("name"), payload.get("date_range"))
+    invite_url, _ = _invite_and_qr(s["session_id"])  # single helper (P1.4)
     return {
         "session_id": s["session_id"],
-        "invite_url": f"https://orkestr.app/join/{s['session_id']}",
+        "invite_url": invite_url,
         "members": [{"id": m["id"], "name": m["name"], "avatar": m.get("avatar")}
                     for m in s["members"]],
     }
@@ -748,6 +780,9 @@ def session_public(sid: str):
         "booking_ref": plan.get("booking_ref") if plan else None,
         "payment_mode": payment_mode,
         "booking_failed": bool(s.get("booking_failed")),
+        # Public, user-safe failure reason so a phone can render the failure state
+        # without a second round-trip (already exposed on /api/status). No secrets.
+        "fail_reason": s.get("fail_reason"),
         "venue_status": s.get("venue_status"),
         "venue_verification": venue_verification,
         "plan": plan_summary,
@@ -773,18 +808,21 @@ def session_plan(sid: str):
 
 @app.get("/api/plan/{sid}")
 def plan(sid: str):
+    """PURE READ (P1.1): never computes. 409 not_ready if the plan isn't ready.
+    /api/status is the compute gate; ORK-001 is precomputed so it returns 200."""
     s = _require_session(sid)
-    if not s["plan"]:
-        S.compute_plan(sid)
+    if not s.get("plan"):
+        return _not_ready(s)
     return s["plan"]
 
 
 @app.get("/api/negotiation/{sid}")
 def negotiation(sid: str):
-    """NEW — feeds the negotiation RING on /waiting (Act 1 money shot)."""
+    """Negotiation transcript. PURE READ (P1.1): never computes; 409 not_ready
+    until the plan is computed via /api/status."""
     s = _require_session(sid)
-    if not s["negotiation"]:
-        S.compute_plan(sid)
+    if not s.get("negotiation"):
+        return _not_ready(s)
     return s["negotiation"]
 
 
@@ -801,10 +839,11 @@ def approve(sid: str, body: dict = Body(...)):
 
 @app.get("/api/handshake/{sid}")
 def handshake(sid: str):
-    """Full request -> counter -> mandate, so /confirmed can show the exchange (Act 2)."""
+    """Full request -> counter -> mandate, so /confirmed can show the exchange (Act 2).
+    PURE READ (P1.1): never computes; 409 not_ready until computed via /api/status."""
     s = _require_session(sid)
-    if not s["handshake"]:
-        S.compute_plan(sid)
+    if not s.get("handshake"):
+        return _not_ready(s)
     return s["handshake"]
 
 
@@ -870,19 +909,37 @@ def settle_ep(sid: str, body: dict = Body(default={})):
 
 @app.get("/api/split/{sid}")
 def split(sid: str, mode: str = "itemized"):
-    """Smart itemized meal split for the session (demo-state).
+    """Smart itemized meal split for THIS session (P1.3 — session-linked).
 
     Orkestr pays the merchant ONCE over x402; this is the internal settlement —
     each friend's share from what they actually ordered, shared dishes split only
     among the friends who joined them, service charge + GST allocated fairly.
-    Never triggers a payment. mode = "itemized" (default) or "equal".
+    Computed from the room's own members + orders (a session-linked draft is
+    initialised on first read if none exist), NOT global canned data. The response
+    carries an additive `split_source` so the UI can label it honestly. Never
+    triggers a payment. mode = "itemized" (default) or "equal".
     """
     _require_session(sid)
     if mode not in ("itemized", "equal"):
         raise HTTPException(status_code=400, detail="mode must be 'itemized' or 'equal'")
-    from core.meal_split import demo_meal_split
+    split_data, _ = S.get_session_split(sid, mode)
+    return split_data
 
-    return demo_meal_split(mode=mode)
+
+@app.post("/api/split/{sid}/orders")
+def split_orders(sid: str, body: dict = Body(default={}), mode: str = "itemized"):
+    """Replace THIS session's orders (presenter edit / captured order) and return the
+    recomputed split. Body: {"items": [{id,name,price,quantity,assigned_to,shared_by,
+    category}]}. Item members are validated against the room; the split then reports
+    split_source="backend_live_orders". Pure math — never triggers a payment."""
+    _require_session(sid)
+    if mode not in ("itemized", "equal"):
+        raise HTTPException(status_code=400, detail="mode must be 'itemized' or 'equal'")
+    items = body.get("items")
+    if not isinstance(items, list):
+        raise HTTPException(status_code=400, detail="items (list) required")
+    split_data, _ = S.set_session_orders(sid, items, mode)
+    return split_data
 
 
 @app.post("/api/discovery/venues")

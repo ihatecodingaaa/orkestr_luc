@@ -169,6 +169,7 @@ export type PublicSession = {
   booking_ref?: string | null;
   payment_mode?: string | null;
   booking_failed: boolean;
+  fail_reason?: string | null;
   venue_status?: string | null;
   venue_verification?: (VenueVerification & { name?: string; address?: string }) | null;
   plan?: PublicPlan | null;
@@ -184,6 +185,13 @@ export type LiveState = {
   handshake: Handshake;
   settlement: Settlement;
   venueStatus?: string | null;
+  // Failure surfaced by the status gate (quorum / no verified venue / mandate
+  // integrity). When set, the room did NOT succeed — never reveal a sample plan.
+  failReason?: string | null;
+  bookingFailed?: boolean;
+  // False when the plan isn't computed yet (status said not_ready) — the pure-read
+  // endpoints returned 409 and we did not fan out. The UI stays in waiting/working.
+  planReady?: boolean;
   checkedAt: string;
 };
 
@@ -324,27 +332,56 @@ export async function approveTransfer(sessionId: string, personId: string): Prom
   });
 }
 
-// Reads the whole live picture in one shot once the plan is ready.
+// Like fetchJson but returns null on a 409 not_ready — a pure-read endpoint whose
+// plan isn't computed yet (P1.1). The caller renders calmly instead of throwing.
+async function fetchMaybeNotReady<T>(path: string): Promise<T | null> {
+  const response = await fetch(`${API_BASE}${path}`, {
+    cache: "no-store",
+    headers: { "Content-Type": "application/json" },
+  });
+  if (response.status === 409) return null;
+  if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+  return (await response.json()) as T;
+}
+
+// Reads the whole live picture. /api/status is the SINGLE compute gate (P1.1): we
+// call it first and only fan out to the pure-read plan/negotiation/handshake
+// endpoints once a plan is actually ready. A not_ready or failed room returns a
+// state carrying the phase/failReason so the UI branches to waiting/working/
+// failure — it never triggers a compute and never dead-ends on a raw 409.
 export async function readLiveState(sessionId: string): Promise<LiveState> {
-  const [status, negotiation, plan, handshake, settlement] = await Promise.all([
-    fetchJson<StatusResponse>(`/api/status/${sessionId}`),
-    fetchJson<Message[]>(`/api/negotiation/${sessionId}`),
-    fetchJson<Plan>(`/api/plan/${sessionId}`),
-    fetchJson<Handshake>(`/api/handshake/${sessionId}`),
-    fetchJson<Settlement>(`/api/settlement/${sessionId}`),
+  const status = await fetchJson<StatusResponse>(`/api/status/${sessionId}`);
+  const phase = status.phase ?? "unknown";
+  const checkedAt = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const planReady = phase === "plan_ready" || phase === "booking" || phase === "confirmed";
+
+  const base: LiveState = {
+    phase,
+    plan: {},
+    negotiation: [],
+    handshake: {},
+    settlement: {},
+    venueStatus: status.venue_status ?? null,
+    failReason: status.fail_reason ?? null,
+    bookingFailed: Boolean(status.booking_failed),
+    planReady,
+    checkedAt,
+  };
+  if (!planReady) return base;
+
+  const [negotiation, plan, handshake, settlement] = await Promise.all([
+    fetchMaybeNotReady<Message[]>(`/api/negotiation/${sessionId}`),
+    fetchMaybeNotReady<Plan>(`/api/plan/${sessionId}`),
+    fetchMaybeNotReady<Handshake>(`/api/handshake/${sessionId}`),
+    fetchMaybeNotReady<Settlement>(`/api/settlement/${sessionId}`),
   ]);
 
   return {
-    phase: status.phase ?? "unknown",
-    plan,
+    ...base,
+    plan: plan ?? {},
     negotiation: Array.isArray(negotiation) ? negotiation : [],
-    handshake,
-    settlement,
-    venueStatus: status.venue_status ?? null,
-    checkedAt: new Date().toLocaleTimeString([], {
-      hour: "2-digit",
-      minute: "2-digit",
-    }),
+    handshake: handshake ?? {},
+    settlement: settlement ?? {},
   };
 }
 

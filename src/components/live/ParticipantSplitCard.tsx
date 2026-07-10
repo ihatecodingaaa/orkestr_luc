@@ -1,4 +1,4 @@
-import { fmtMoney } from "@/lib/split";
+import { fmtMoney, splitSourceLabel } from "@/lib/split";
 import type { MealSplit } from "@/lib/split";
 import type { SplitSource } from "@/lib/useRoom";
 import s from "./live.module.css";
@@ -27,7 +27,7 @@ export function ParticipantSplitCard({
           <span className={s.stageKicker}>Your share</span>
           <h3 className={s.splitTitle}>{myName ?? me.name} owes {fmtMoney(me.total)}</h3>
           <span className={s.splitSourceBadge} data-source={source}>
-            {source === "backend" ? "Calculated by Orkestr backend" : "Demo split preview"}
+            {splitSourceLabel(split, source)}
           </span>
         </div>
         <span className={s.splitTotal}>{fmtMoney(split.total)} bill</span>

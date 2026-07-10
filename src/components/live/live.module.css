@@ -2672,6 +2672,39 @@
   color: var(--muted);
 }
 
+/* ---- live failure card (P1.2) ---- */
+.failCard {
+  border-color: color-mix(in srgb, #e5484d 42%, transparent);
+  background: color-mix(in srgb, #e5484d 6%, var(--panel));
+}
+.failHint {
+  margin: 0 auto 4px;
+  max-width: 40ch;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--muted-2);
+}
+.failActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: center;
+  margin-top: 20px;
+}
+.failTech {
+  margin: 16px auto 0;
+  max-width: 44ch;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted-2);
+  word-break: break-word;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--panel-strong) 60%, transparent);
+  border: 1px solid var(--border);
+}
+
 /* ================= smart itemized split ================= */
 .splitCard {
   padding: 22px 24px;
