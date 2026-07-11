@@ -665,19 +665,40 @@ def member_prefs(member_id: str):
 @app.get("/api/status/{sid}")
 def status(sid: str):
     s = _require_session(sid)
+    # Additive quorum report (P2.2) — pure read, never computes. Lets the presenter
+    # see quorum readiness without drafting; the explicit POST /draft is the only
+    # quorum compute trigger.
+    q = S.quorum_report(s)
     if s["phase"] == "negotiating":
-        # Live sessions wait until all 5 members press find-our-plan; everyone
-        # else (incl. ORK-001) keeps the original lazy-compute behaviour.
+        # Live sessions wait until ALL members press find-our-plan before the lazy
+        # auto-compute; a quorum draft is a separate, explicit presenter action
+        # (POST /api/session/{sid}/draft) and never auto-fires here. Everyone else
+        # (incl. ORK-001) keeps the original lazy-compute behaviour.
         if s.get("live") and not S.all_ready(s):
             return {"phase": s["phase"],
                     "ready": s.get("ready", []),
-                    "members_total": len(s["members"])}
+                    **q}
         S.compute_plan(sid)  # lazily produce the plan -> plan_ready
+        q = S.quorum_report(s)  # refresh plan_basis now that a plan exists
     if s["phase"] == "failed":
         return {"phase": "failed", "booking_failed": True,
                 "fail_reason": s.get("fail_reason"),
-                "venue_status": s.get("venue_status")}
-    return {"phase": s["phase"], "venue_status": s.get("venue_status")}
+                "venue_status": s.get("venue_status"), **q}
+    return {"phase": s["phase"], "venue_status": s.get("venue_status"), **q}
+
+
+@app.post("/api/session/{sid}/draft")
+def session_draft(sid: str):
+    """P2.2 — presenter starts a QUORUM DRAFT once enough friends have replied,
+    instead of waiting for everyone. Explicit trigger only (GETs never compute).
+    400 if not a live session; 409 if quorum isn't reached yet. Idempotent for the
+    same reply set. Runs under the P0 per-session compute lock."""
+    _require_session(sid)
+    s = S.draft_plan(sid)
+    return {"ok": True, "phase": s.get("phase"),
+            "plan_basis": s.get("plan_basis"),
+            "draft_started_with": s.get("draft_started_with") or [],
+            **S.quorum_report(s)}
 
 
 @app.get("/api/session/{sid}/public")
@@ -786,6 +807,9 @@ def session_public(sid: str):
         "venue_status": s.get("venue_status"),
         "venue_verification": venue_verification,
         "plan": plan_summary,
+        # Additive quorum state (P2.2) so the waiting room can show honest progress
+        # ("3 of 5 replied") and label a quorum-based plan as a draft. No secrets.
+        **S.quorum_report(s),
     }
     # Public fresh x402 receipt auto-fired at booking time (core.session
     # _maybe_fire_x402_receipt). Additive: only present when a real receipt with a

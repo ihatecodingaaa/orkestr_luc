@@ -43,8 +43,10 @@ import {
   paymentMode,
   readLiveState,
   shortHash,
+  startDraft,
   submitConstraints,
   toReceipt,
+  updateDraft,
 } from "@/lib/orkestr-api";
 import type {
   Constraints,
@@ -261,6 +263,12 @@ export function GroupRoom({
   // auto-run effect immediately recompute the SAME failing constraints in a loop.
   // Set true when the presenter goes back to edit; cleared on the next submit/retry.
   const [suppressAutoRun, setSuppressAutoRun] = useState(false);
+  // Presenter dismissed the "start draft at quorum" bar to keep waiting for all.
+  const [draftDismissed, setDraftDismissed] = useState(false);
+  // Re-draft (P2 follow-up): in-flight flag for "Update draft", and a dismiss for
+  // the "more friends replied" banner (reappears if even more reply — see effect).
+  const [updatingDraft, setUpdatingDraft] = useState(false);
+  const [staleDismissed, setStaleDismissed] = useState(false);
   // Soft, demo-safe sync state — we never surface raw backend errors to the UI.
   // Real errors still go to the console (see usePublicSession + the catches).
   const [syncWarn, setSyncWarn] = useState(false);
@@ -349,6 +357,53 @@ export function GroupRoom({
     },
     [pushActivity],
   );
+
+  // P2.2 — presenter drafts a plan at quorum without waiting for everyone. Explicit
+  // action: calls POST /draft (the backend refuses below quorum), then reveals the
+  // real plan. Guarded by startedRef so the all-ready auto-run can't double-fire.
+  const startDraftNow = useCallback(async () => {
+    if (!sessionId || localRoom || startedRef.current) return;
+    startedRef.current = true;
+    setSuppressAutoRun(false);
+    setWorking(true);
+    setTimelineStep(1);
+    pushActivity({ kind: "system", text: "Presenter started a draft with the friends who replied" });
+    try {
+      await startDraft(sessionId);
+      const live = await readLiveState(sessionId);
+      setState(live);
+      setTimelineStep(TIMELINE_STEPS.length);
+      setRevealed(true);
+    } catch (e) {
+      console.warn("[orkestr] quorum draft failed", e);
+      setSyncWarn(true);
+      setTimelineStep(TIMELINE_STEPS.length);
+      setRevealed(true);
+    } finally {
+      setWorking(false);
+    }
+  }, [sessionId, localRoom, pushActivity]);
+
+  // Re-draft (P2 follow-up): fold in friends who replied after the first draft.
+  // Recomputes in place (same room, plan card refreshes) and is payment-neutral —
+  // the backend never re-fires x402. On failure the shared `failed` branch renders
+  // LiveFailureCard (no sample fallback in live mode).
+  const updateDraftNow = useCallback(async () => {
+    if (!sessionId || localRoom || updatingDraft) return;
+    setUpdatingDraft(true);
+    setStaleDismissed(false);
+    pushActivity({ kind: "system", text: "Updating the draft with the latest replies" });
+    try {
+      await updateDraft(sessionId);
+      const live = await readLiveState(sessionId);
+      setState(live);
+    } catch (e) {
+      console.warn("[orkestr] update draft failed", e);
+      setSyncWarn(true);
+    } finally {
+      setUpdatingDraft(false);
+    }
+  }, [sessionId, localRoom, updatingDraft, pushActivity]);
 
   // Bind to a shared room id, or create a fresh live session and make the
   // presenter URL shareable so friends' links resolve to the same backend room.
@@ -791,6 +846,47 @@ export function GroupRoom({
   );
   const failReason = state?.failReason ?? pub.data?.fail_reason ?? null;
 
+  // Quorum planning (P2.2). Backend snapshot is the honest source; fall back to
+  // local readiness only when offline. "Start draft now" is presenter-only and
+  // appears only once quorum is met and not everyone is in yet.
+  const quorumMin = pub.data?.quorum_min ?? 3;
+  const repliedCount = pub.data?.replied_count ?? readyIds.length;
+  const membersTotalQ = pub.data?.members_total ?? roomMembers.length;
+  const quorumReady = pub.data?.quorum_ready ?? repliedCount >= quorumMin;
+  const backendAllReady = pub.data?.all_ready ?? allSubmitted;
+  const planBasis = state?.planBasis ?? pub.data?.plan_basis ?? null;
+  const isQuorumDraft = planBasis === "quorum_draft";
+  const draftBasisCount =
+    (state?.draftStartedWith ?? pub.data?.draft_started_with ?? []).length || repliedCount;
+  const canStartDraft =
+    isLive &&
+    !localRoom &&
+    ENABLE_LIVE_PIPELINE &&
+    quorumReady &&
+    !backendAllReady &&
+    !revealed &&
+    !working &&
+    !draftDismissed;
+
+  // Stale draft (P2 follow-up): friends replied after this quorum draft was made.
+  const newRepliesSinceDraft = pub.data?.new_replies_since_draft ?? 0;
+  const draftStale = Boolean(pub.data?.draft_stale) && newRepliesSinceDraft > 0;
+  const showStaleDraft =
+    isLive &&
+    !localRoom &&
+    revealed &&
+    !working &&
+    !failed &&
+    isQuorumDraft &&
+    draftStale &&
+    !staleDismissed;
+  // If even MORE friends reply after a dismiss, surface the banner again.
+  const prevNewRepliesRef = useRef(0);
+  useEffect(() => {
+    if (newRepliesSinceDraft > prevNewRepliesRef.current) setStaleDismissed(false);
+    prevNewRepliesRef.current = newRepliesSinceDraft;
+  }, [newRepliesSinceDraft]);
+
   const planVerification = displayPlan?.venue?.verification;
   const bookingMode = bookingModeLabel(planVerification);
 
@@ -908,6 +1004,36 @@ export function GroupRoom({
         />
       ) : null}
 
+      {isLive && stage === "social" && canStartDraft ? (
+        <div className={s.quorumBar} role="status">
+          <div className={s.quorumBarText}>
+            <strong className={s.quorumBarLead}>
+              {repliedCount} of {membersTotalQ} replied.
+            </strong>
+            <span className={s.quorumBarSub}>
+              Orkestr can draft a plan now — or wait for everyone. Late friends can still adjust.
+            </span>
+          </div>
+          <div className={s.quorumBarActions}>
+            <button
+              type="button"
+              className={s.btnPrimarySm}
+              onClick={() => void startDraftNow()}
+              disabled={working}
+            >
+              {working ? "Drafting…" : "Start draft now"}
+            </button>
+            <button
+              type="button"
+              className={s.quorumBarWait}
+              onClick={() => setDraftDismissed(true)}
+            >
+              Wait for everyone
+            </button>
+          </div>
+        </div>
+      ) : null}
+
       <div className={s.roomGrid}>
         <section className={s.colConstraints} aria-label="Member constraints">
           <div className={s.colHead}>
@@ -980,6 +1106,44 @@ export function GroupRoom({
                 <NoVerifiedVenueCard />
               ) : (
                 <>
+                  {showStaleDraft ? (
+                    <div className={s.restaleBanner} role="status">
+                      <div className={s.restaleText}>
+                        <strong className={s.restaleTitle}>More friends replied</strong>
+                        <span className={s.restaleBody}>
+                          {newRepliesSinceDraft} more {newRepliesSinceDraft === 1 ? "friend has" : "friends have"} replied
+                          since this draft was created. Orkestr can update the plan with everyone&apos;s
+                          latest constraints.
+                        </span>
+                      </div>
+                      <div className={s.restaleActions}>
+                        <button
+                          type="button"
+                          className={s.btnPrimarySm}
+                          onClick={() => void updateDraftNow()}
+                          disabled={updatingDraft}
+                        >
+                          {updatingDraft ? "Updating…" : "Update draft"}
+                        </button>
+                        <button
+                          type="button"
+                          className={s.quorumBarWait}
+                          onClick={() => setStaleDismissed(true)}
+                        >
+                          Keep current plan
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+                  {isQuorumDraft ? (
+                    <div className={s.draftBanner} role="status">
+                      <span className={s.draftBannerTag}>Draft</span>
+                      <span className={s.draftBannerText}>
+                        Draft based on {draftBasisCount} of {membersTotalQ} replies. Late friends can
+                        still join and adjust before you confirm.
+                      </span>
+                    </div>
+                  ) : null}
                   <FinalPlanCard plan={displayPlan} members={roomMembers} />
                   <TrustPanel
                     verification={displayPlan.venue?.verification}

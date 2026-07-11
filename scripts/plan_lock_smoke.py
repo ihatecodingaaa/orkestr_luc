@@ -53,10 +53,10 @@ def _fake_fire(s, sid):
 _orig_body = S._compute_plan_body
 
 
-def _counting_body(sid):
+def _counting_body(sid, member_ids=None):
     with _lock:
         _body_calls["n"] += 1
-    return _orig_body(sid)
+    return _orig_body(sid, member_ids=member_ids)
 
 
 S._maybe_fire_x402_receipt = _fake_fire   # counted, never touches payments

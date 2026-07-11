@@ -63,6 +63,27 @@ export function TrustPanel({
       </button>
       {open ? (
         <div className={s.trustBody}>
+          <ul className={s.trustPillars} aria-label="What makes this hard to fake">
+            {[
+              "Real venue evidence",
+              "Group agreement",
+              "Fair split math",
+              "Payment proof",
+              "Merchant adapter",
+              "Guest-first flow",
+            ].map((p) => (
+              <li key={p} className={s.trustPillar}>
+                <span className={s.trustPillarMark} aria-hidden>
+                  ✓
+                </span>
+                {p}
+              </li>
+            ))}
+          </ul>
+          <p className={s.trustMoatLead}>
+            Split apps start after the meal. Orkestr starts before the decision and carries through
+            to handoff, split, and proof.
+          </p>
           <div className={s.trustRow}>
             <span className={s.trustLabel}>Venue source</span>
             <span className={s.trustValue}>
@@ -124,9 +145,9 @@ export function TrustPanel({
             </span>
           </div>
           <p className={s.trustMoat}>
-            General assistants can suggest a restaurant. Orkestr coordinates the whole group —
-            constraints, trade-offs, verified venue evidence, a fair itemized split, and payment
-            proof — in one shareable room.
+            <strong>Google finds places. Orkestr gets groups to agree.</strong> General assistants
+            can suggest a restaurant; Orkestr coordinates the whole group — constraints, trade-offs,
+            verified venue evidence, a fair itemized split, and payment proof — in one shareable room.
           </p>
         </div>
       ) : null}

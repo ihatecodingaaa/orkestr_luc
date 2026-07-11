@@ -24,6 +24,10 @@ from payments.x402 import stamp
 
 DATA = os.path.join(os.path.dirname(__file__), "..", "data")
 PHASES = ["negotiating", "plan_ready", "booking", "confirmed"]
+# Quorum planning (P2.2): a live room may draft a plan once at least this many
+# members have replied — the host doesn't have to wait for everyone. This is a
+# minimum to DRAFT; the all-ready path is unchanged.
+QUORUM_MIN = 3
 
 LOGGER = logging.getLogger(__name__)
 
@@ -118,6 +122,7 @@ def new_live_session(name=None, date_range=None):
     s["members"] = shells
     s["live"] = True
     s["ready"] = []
+    s["quorum_min"] = QUORUM_MIN  # P2.2: draft allowed once this many reply
     db.set_session(s["session_id"], s)  # write-through AFTER mutation
     return s
 
@@ -178,6 +183,68 @@ def all_ready(s):
     if not member_ids:
         return False
     return member_ids.issubset(set(s.get("ready", [])))
+
+
+# ---------------------------------------------------------------------------
+# Quorum planning (P2.2). "Replied" = a member who pressed find-our-plan (in the
+# ready list). Non-live sessions (ORK-001, scratch) are treated as fully replied
+# since they are not gated on live readiness. All helpers are pure reads.
+# ---------------------------------------------------------------------------
+
+def _member_ids(s):
+    return [m["id"] for m in s.get("members", [])
+            if isinstance(m, dict) and m.get("id")]
+
+
+def quorum_min(s):
+    """Configured minimum replies to draft (defaults to QUORUM_MIN)."""
+    v = s.get("quorum_min")
+    return v if isinstance(v, int) and v > 0 else QUORUM_MIN
+
+
+def replied_ids(s):
+    """Member ids who have replied. Non-live sessions count as fully replied."""
+    ids = _member_ids(s)
+    if not s.get("live"):
+        return list(ids)
+    ready = set(s.get("ready", []))
+    return [mid for mid in ids if mid in ready]
+
+
+def pending_ids(s):
+    """Member ids who have NOT replied yet (empty for non-live sessions)."""
+    replied = set(replied_ids(s))
+    return [mid for mid in _member_ids(s) if mid not in replied]
+
+
+def quorum_report(s):
+    """Additive, public quorum status for /api/status and /public. Never computes."""
+    total = len(_member_ids(s))
+    replied = replied_ids(s)
+    replied_count = len(replied)
+    # A quorum draft always records plan_basis explicitly; any other existing plan
+    # is a normal all-ready plan (covers ORK-001 and sessions seeded before P2.2).
+    plan_basis = s.get("plan_basis")
+    if plan_basis is None and s.get("plan"):
+        plan_basis = "all_ready"
+    # Stale-draft indicator (P2 follow-up): how many members replied AFTER this
+    # quorum draft was created, so the presenter can fold them in. Only meaningful
+    # for an existing quorum draft; an all-ready plan is never "stale".
+    drafted = s.get("draft_started_with") or []
+    has_quorum_draft = plan_basis == "quorum_draft" and len(drafted) > 0
+    new_since = max(0, replied_count - len(drafted)) if has_quorum_draft else 0
+    return {
+        "members_total": total,
+        "replied_count": replied_count,
+        "quorum_min": quorum_min(s),
+        "quorum_ready": total > 0 and replied_count >= quorum_min(s),
+        "all_ready": total > 0 and replied_count == total,
+        "pending_members": pending_ids(s),
+        "plan_basis": plan_basis,
+        "draft_started_with": drafted,
+        "new_replies_since_draft": new_since,
+        "draft_stale": new_since > 0,
+    }
 
 
 def add_constraints(sid, person):
@@ -394,12 +461,16 @@ def _no_verified_venue(s):
     return s
 
 
-def compute_plan(sid):
+def compute_plan(sid, member_ids=None):
     """Negotiation -> plan -> venue handshake. Moves phase to plan_ready.
 
     Serialized per session: two concurrent callers (two devices/tabs polling the
     same room) can't run the pipeline twice or double-spawn the receipt daemon.
     The second caller waits on the lock, then no-ops if a plan already landed.
+
+    member_ids (P2.2 quorum draft): when given, ONLY those members' constraints
+    enter negotiation — pending members are excluded, never fabricated. None (the
+    default, all-ready path) uses every member and is byte-for-byte the old flow.
     """
     s = db.get_session(sid)
     if s is None:
@@ -411,15 +482,19 @@ def compute_plan(sid):
             raise HTTPException(status_code=404, detail="session not found")
         if s.get("plan") and s.get("phase") in ("plan_ready", "booking", "confirmed"):
             return s
-        return _compute_plan_body(sid)
+        return _compute_plan_body(sid, member_ids=member_ids)
 
 
-def _compute_plan_body(sid):
+def _compute_plan_body(sid, member_ids=None):
     """The actual compute pipeline. Always called while holding _compute_lock(sid)."""
     s = db.get_session(sid)
     if s is None:
         raise HTTPException(status_code=404, detail="session not found")
     members = _members(s)
+    # Quorum draft: restrict negotiation to the members who actually replied.
+    if member_ids is not None:
+        subset = set(member_ids)
+        members = [m for m in members if isinstance(m, dict) and m.get("id") in subset]
     seed_venues = _load("venues.json")
 
     from agents.venue_grounding import (
@@ -542,11 +617,16 @@ def _compute_plan_body(sid):
     }
     if s["phase"] in ("negotiating", "failed"):
         s["phase"] = "plan_ready"
+    # Record how this plan was reached (P2.2): a quorum draft vs the full all-ready
+    # run. Additive — the UI labels a draft honestly; all-ready plans are unlabelled.
+    s["plan_basis"] = "quorum_draft" if member_ids is not None else "all_ready"
     # Live sessions have no seeded expenses, so x402 would have nothing to
     # settle. Treat the venue booking the Convener (first member) struck over
-    # ACP as a fronted expense, split evenly — that's what x402 reimburses.
+    # ACP as a fronted expense, split evenly — that's what x402 reimburses. For a
+    # quorum draft this splits among the members actually included in the draft.
     if s.get("live") and not s.get("_booking_expense_added"):
-        members = _members(s)
+        members = [m for m in _members(s)
+                   if member_ids is None or (isinstance(m, dict) and m.get("id") in set(member_ids))]
         total = (s["plan"] or {}).get("total_cost") or 0
         if members and total:
             s["_booking_expense_added"] = True
@@ -597,6 +677,59 @@ def _compute_plan_body(sid):
     # response returns immediately. The daemon thread persists the receipt itself
     # (see _maybe_fire_x402_receipt); /public delivers it to the UI once it lands.
     _spawn_x402_receipt_once(s, sid)
+    return s
+
+
+def draft_plan(sid):
+    """P2.2 — presenter-triggered QUORUM DRAFT. Explicit POST only (never a GET
+    side effect). Computes a plan from the members who have replied so far, once
+    quorum is met, WITHOUT waiting for everyone. Refuses below quorum. Idempotent
+    for the same reply set; re-runs (recomputes) when more members have since
+    replied so a late joiner is honestly included.
+
+    Raises: 404 unknown session, 400 non-live session, 409 below quorum.
+    """
+    s = db.get_session(sid)
+    if s is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    if not s.get("live"):
+        raise HTTPException(status_code=400,
+                            detail="draft is only available for live sessions")
+    replied = replied_ids(s)
+    if len(replied) < quorum_min(s):
+        raise HTTPException(
+            status_code=409,
+            detail=(f"quorum not reached: {len(replied)} of {len(_member_ids(s))} replied "
+                    f"(need {quorum_min(s)})"))
+
+    # Idempotent: same reply set + an existing draft -> return it unchanged (no
+    # recompute, no payment churn). Re-drafting with MORE repliers falls through.
+    has_plan = bool(s.get("plan")) and s.get("phase") in ("plan_ready", "booking", "confirmed")
+    if has_plan and sorted(s.get("draft_started_with") or []) == sorted(replied):
+        return s
+
+    # Everyone has now replied -> use the standard all-ready path (member_ids=None)
+    # and tag it all_ready; otherwise draft with just the replied subset.
+    full = len(replied) == len(_member_ids(s))
+
+    # (Re)draft. Clear any prior plan so the compute lock's double-check recomputes;
+    # keep the one-shot x402 guard intact — we NEVER reset _x402_fired, so a re-draft
+    # can never spawn a second receipt daemon or re-fire a payment.
+    s["plan"] = None
+    s["negotiation"] = None
+    s["handshake"] = None
+    s["phase"] = "negotiating"
+    s["booking_failed"] = False
+    s["fail_reason"] = None
+    s["draft_started_with"] = list(replied)
+    db.set_session(sid, s)  # write-through before recompute
+    compute_plan(sid, member_ids=None if full else replied)
+    s = db.get_session(sid)
+    # Keep the draft provenance even if the compute path failed (quorum/no venue).
+    s["draft_started_with"] = list(replied)
+    if s.get("phase") != "failed":
+        s["plan_basis"] = "all_ready" if full else "quorum_draft"
+    db.set_session(sid, s)
     return s
 
 

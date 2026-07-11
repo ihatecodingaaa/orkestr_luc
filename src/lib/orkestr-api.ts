@@ -110,10 +110,25 @@ export type Settlement = {
   net_after?: Record<string, number>;
 };
 
-export type StatusResponse = {
+// Additive quorum planning fields (P2.2) shared by /api/status and /public.
+export type QuorumInfo = {
+  members_total?: number;
+  replied_count?: number;
+  quorum_min?: number;
+  quorum_ready?: boolean;
+  all_ready?: boolean;
+  pending_members?: string[];
+  plan_basis?: "all_ready" | "quorum_draft" | null;
+  draft_started_with?: string[];
+  // How many friends replied AFTER the current quorum draft was created, so the
+  // presenter can fold them in. draft_stale is true when that count > 0.
+  new_replies_since_draft?: number;
+  draft_stale?: boolean;
+};
+
+export type StatusResponse = QuorumInfo & {
   phase?: string;
   ready?: string[];
-  members_total?: number;
   booking_failed?: boolean;
   fail_reason?: string | null;
   venue_status?: string | null;
@@ -155,7 +170,7 @@ export type PublicPlan = {
   } | null;
 };
 
-export type PublicSession = {
+export type PublicSession = QuorumInfo & {
   session_id: string;
   name?: string;
   live: boolean;
@@ -192,6 +207,10 @@ export type LiveState = {
   // False when the plan isn't computed yet (status said not_ready) — the pure-read
   // endpoints returned 409 and we did not fan out. The UI stays in waiting/working.
   planReady?: boolean;
+  // "quorum_draft" when the plan came from a partial-quorum draft (P2.2), so the UI
+  // can label it "draft based on N of M replies". "all_ready" for a full run.
+  planBasis?: "all_ready" | "quorum_draft" | null;
+  draftStartedWith?: string[];
   checkedAt: string;
 };
 
@@ -320,6 +339,23 @@ export async function getStatus(sessionId: string): Promise<StatusResponse> {
   return fetchJson<StatusResponse>(`/api/status/${sessionId}`);
 }
 
+// P2.2 — presenter starts a QUORUM DRAFT (compute a plan from the friends who have
+// replied, without waiting for everyone). Explicit action only; the backend refuses
+// with 409 below quorum. Runs the pipeline under the P0 per-session compute lock.
+export async function startDraft(
+  sessionId: string,
+): Promise<StatusResponse & { ok?: boolean }> {
+  return fetchJson<StatusResponse & { ok?: boolean }>(`/api/session/${sessionId}/draft`, {
+    method: "POST",
+    body: "{}",
+  });
+}
+
+// Re-draft to fold in friends who replied after the first draft. Same endpoint —
+// the backend recomputes with the current replied set (and promotes to all_ready
+// once everyone is in) without re-firing any payment.
+export const updateDraft = startDraft;
+
 // Safe to poll from any device — read-only, never triggers the pipeline.
 export async function readPublicSession(sessionId: string): Promise<PublicSession> {
   return fetchJson<PublicSession>(`/api/session/${sessionId}/public`);
@@ -365,6 +401,8 @@ export async function readLiveState(sessionId: string): Promise<LiveState> {
     failReason: status.fail_reason ?? null,
     bookingFailed: Boolean(status.booking_failed),
     planReady,
+    planBasis: status.plan_basis ?? null,
+    draftStartedWith: status.draft_started_with ?? [],
     checkedAt,
   };
   if (!planReady) return base;
