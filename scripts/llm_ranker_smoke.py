@@ -175,14 +175,19 @@ os.environ["OPENAI_API_KEY"] = "sk-dummy-mock"
 import agents.google_places as GP  # noqa: E402
 from core import session as S  # noqa: E402
 
+# Both carry a real cheap priceLevel (confirmed ~$20) so they are genuinely
+# affordable at the $25 test budget — the pick is then decided by the ranker, not
+# filtered on price. (Price is now an independent venue signal, never the budget.)
 _B = {"id": "PLACE_B", "displayName": {"text": "Beta Group Dining"},
       "formattedAddress": "5 Beta Rd, Singapore 100200",
       "googleMapsUri": "https://maps.google.com/?cid=b", "businessStatus": "OPERATIONAL",
-      "types": ["restaurant", "food"], "primaryType": "restaurant", "rating": 4.6, "userRatingCount": 900}
+      "types": ["restaurant", "food"], "primaryType": "restaurant",
+      "priceLevel": "PRICE_LEVEL_INEXPENSIVE", "rating": 4.6, "userRatingCount": 900}
 _A = {"id": "PLACE_A", "displayName": {"text": "Hawker Alpha"},
       "formattedAddress": "1 Alpha St, Singapore 111222",
       "googleMapsUri": "https://maps.google.com/?cid=a", "businessStatus": "OPERATIONAL",
-      "types": ["food_court", "food"], "primaryType": "food_court", "rating": 4.1, "userRatingCount": 5000}
+      "types": ["food_court", "food"], "primaryType": "food_court",
+      "priceLevel": "PRICE_LEVEL_INEXPENSIVE", "rating": 4.1, "userRatingCount": 5000}
 
 
 def _fake_places(query, api_key, limit):

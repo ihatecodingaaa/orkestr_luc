@@ -92,17 +92,26 @@ S.seed_demo()
 ork = (S.get("ORK-001") or {}).get("plan", {}).get("per_person")
 check("ORK-001 per_person stays 80 (frozen)", ork == 80, f"per_person={ork}")
 
-# 5. Source regression: the fabricated flat $45 default is gone from the verified
-#    Places path and is NOT replaced by another fixed fake number — the estimate is
-#    tier-derived and capped at budget, so a price-less venue is honest + in-budget.
+# 5. Source regression: NO price estimate is derived from the group budget. The old
+#    flat $45 AND the budget-tier estimator are gone; a price-less venue's estimate
+#    is an INDEPENDENT venue-type signal (from the matched query), never the budget.
 import agents.google_places as GP  # noqa: E402
+import inspect  # noqa: E402
 check("agents.google_places._DEFAULT_PER_HEAD removed", not hasattr(GP, "_DEFAULT_PER_HEAD"))
-check("price-less estimate is tier-derived (15->15, 35->30, 80->45), never a flat 45",
-      GP._approx_per_head_for_budget(15) == 15 and GP._approx_per_head_for_budget(35) == 30
-      and GP._approx_per_head_for_budget(80) == 45,
-      f"{GP._approx_per_head_for_budget(15)}/{GP._approx_per_head_for_budget(35)}/{GP._approx_per_head_for_budget(80)}")
-check("price-less estimate never exceeds the group budget",
-      all(GP._approx_per_head_for_budget(b) <= b for b in (12, 15, 18, 20, 30, 40)))
+check("budget-derived estimator removed (_approx_per_head_for_budget gone)",
+      not hasattr(GP, "_approx_per_head_for_budget"))
+check("normalize_verified_place has NO budget_max param (price can't read budget)",
+      "budget_max" not in inspect.signature(GP.normalize_verified_place).parameters)
+check("venue-type estimate is independent of budget (hawker 12 / casual 28 / upscale 90)",
+      GP._venue_type_estimate("hawker centre") == 12 and GP._venue_type_estimate("casual eatery") == 28
+      and GP._venue_type_estimate("private dining") == 90,
+      f"{GP._venue_type_estimate('hawker centre')}/{GP._venue_type_estimate('casual eatery')}/{GP._venue_type_estimate('private dining')}")
+check("priceRange (real Google $) is read and wins -> confirmed",
+      (lambda c: c is not None and c.get("price_per_head") == 80 and c.get("price_confidence") == "confirmed")(
+          GP.normalize_verified_place({"id": "X", "displayName": {"text": "Ranged Place"},
+              "formattedAddress": "1 Rd, Singapore", "googleMapsUri": "https://maps.google.com/?cid=x",
+              "businessStatus": "OPERATIONAL", "types": ["restaurant"], "primaryType": "restaurant",
+              "priceRange": {"startPrice": {"units": "60"}, "endPrice": {"units": "100"}}}, query="restaurant")))
 
 print("\n" + "=" * 60)
 if _failures:

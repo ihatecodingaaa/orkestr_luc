@@ -40,6 +40,9 @@ _FIELD_MASK = ",".join((
     "places.types",
     "places.primaryType",
     "places.priceLevel",
+    "places.priceRange",   # real per-person price band (startPrice/endPrice) — the
+                           # $ figure Google shows; upscale venues often have this
+                           # even when priceLevel is blank.
     "places.rating",
     "places.userRatingCount",
 ))
@@ -82,18 +85,55 @@ _PRICE_LEVEL_PER_HEAD = {
 }
 
 
-def _approx_per_head_for_budget(budget_max):
-    """Honest per-head ESTIMATE for a verified venue Google returned with NO
-    priceLevel (common for hawker/food-court). Derived from the budget TIER that
-    produced the query — never a fixed unrelated number (the old hard-coded $45 was
-    a hallucinated price and is gone). Capped at the group budget so a real cheap
-    venue is treated as in-budget; the caller marks it price_confidence=approximate
-    and the UI labels it "price approximate".
-    """
-    if isinstance(budget_max, (int, float)) and not isinstance(budget_max, bool) and budget_max > 0:
-        tier = 15 if budget_max <= 20 else 30 if budget_max <= 40 else 45
-        return int(min(tier, budget_max))
-    return 30  # no budget signal -> a mid casual estimate, still flagged approximate
+# Venue-TYPE per-head price bands (SGD): an INDEPENDENT signal about the venue,
+# inferred from the query vocabulary that surfaced it (a proxy for venue type). This
+# is NEVER the group's budget — a $90 private-dining place estimates $90 even for a
+# $15 group, so the affordability filter can then correctly drop it. Ordered most-
+# specific first (hawker before restaurant; upscale before casual).
+_VENUE_TYPE_PER_HEAD = (
+    (("hawker", "food court", "food centre", "kopitiam"), 12),
+    (("private dining", "fine dining", "fine-dining", "omakase", "degustation",
+      "chef's table", "tasting menu", "upscale", "premium", "luxury"), 90),
+    (("casual", "eatery", "cafe", "diner", "bistro", "kopi"), 28),
+    (("restaurant", "group seating", "celebration", "group dining", "birthday",
+      "anniversary"), 45),
+)
+_DEFAULT_TYPE_PER_HEAD = 35
+
+
+def _venue_type_estimate(query):
+    """Independent per-head estimate for a venue Google gave NO price for, derived
+    from the query vocabulary that matched it (venue TYPE) — never the group budget.
+    The caller marks it price_confidence="approximate"."""
+    q = str(query or "").lower()
+    for keys, price in _VENUE_TYPE_PER_HEAD:
+        if any(k in q for k in keys):
+            return price
+    return _DEFAULT_TYPE_PER_HEAD
+
+
+def _price_from_range(place):
+    """Per-head SGD from the Places (New) priceRange (startPrice/endPrice units), or
+    None. This is Google's REAL price band — a confirmed fact about the venue. For a
+    one-sided "$100+" range (startPrice only) we use that value; a two-sided range
+    uses the midpoint so a $50-100 place reads ~$75, not $50."""
+    pr = place.get("priceRange")
+    if not isinstance(pr, dict):
+        return None
+
+    def _units(side):
+        v = pr.get(side)
+        if not isinstance(v, dict):
+            return None
+        try:
+            return int(str(v.get("units")))
+        except (TypeError, ValueError):
+            return None
+
+    lo, hi = _units("startPrice"), _units("endPrice")
+    if lo is not None and hi is not None:
+        return int(round((lo + hi) / 2))
+    return hi if hi is not None else lo
 
 
 def _group_budget_min(personas):
@@ -181,11 +221,20 @@ def build_queries(personas=None, limit: int = 4) -> list:
         q = " ".join(part for part in parts if part).strip()
         if q:
             queries.append(q)
-    # One occasion-flavoured query (real search) when an occasion was detected.
-    # Occasion venues (group seating / private room) are restaurant-tier, so use a
-    # "restaurant" base regardless of budget band.
+    # One occasion-flavoured query (real search) when an occasion was detected. It
+    # INHERITS the group's budget band: occasion refines WITHIN budget, it never
+    # overrides it. A cheap group gets an affordable/casual celebration query (so an
+    # upscale private-dining venue is not even surfaced), a high-budget group can
+    # reach upscale occasion venues. The budget filter is re-applied to the result
+    # regardless, using the venue's real/independent price.
     if occasion_terms:
-        occ_q = " ".join(part for part in [diet_part, "restaurant", occasion_terms[0], "Singapore"]
+        if budget_min is not None and budget_min <= 20:
+            modifier = "affordable"
+        elif budget_min is not None and budget_min <= 40:
+            modifier = "casual"
+        else:
+            modifier = ""  # high budget may reach upscale occasion venues
+        occ_q = " ".join(part for part in [diet_part, modifier, occasion_terms[0], "Singapore"]
                          if part).strip()
         if occ_q and occ_q not in queries:
             queries.append(occ_q)
@@ -301,15 +350,18 @@ def _infer_dietary(query: str, name: str) -> dict:
     }
 
 
-def normalize_verified_place(place: dict, query: str = "", budget_max=None) -> dict | None:
+def normalize_verified_place(place: dict, query: str = "") -> dict | None:
     """Turn a verified place into a candidate that ALSO carries the convener venue
     shape (so it can flow into the planner pool). Returns None if not verified.
 
-    Price truth (anti-hallucination): when Google returns a priceLevel, the per-head
-    is CONFIRMED. When it does not (common for hawker/food-court), we do NOT fake a
-    fixed number — we derive an honest estimate from the group's budget tier, mark
-    price_confidence="approximate", and let the UI label it "price approximate". The
-    venue is genuinely verified; only its price is an estimate.
+    Price truth (anti-hallucination) — resolved from INDEPENDENT venue signals, in
+    order, NEVER from the group's budget:
+      (a) Google priceRange (real $ band)  -> CONFIRMED
+      (b) Google priceLevel enum           -> CONFIRMED (mapped estimate)
+      (c) neither                          -> APPROXIMATE, estimated from the venue
+                                              TYPE implied by the matched query.
+    So a $100 private-dining place reads ~$100 and gets filtered on a $15 budget,
+    instead of being relabelled to the budget number.
     """
     ok, notes = verify_place(place)
     if not ok:
@@ -324,11 +376,15 @@ def normalize_verified_place(place: dict, query: str = "", budget_max=None) -> d
     rating = place.get("rating")
     urc = place.get("userRatingCount")
     diet = _infer_dietary(query, name)
-    if price_level in _PRICE_LEVEL_PER_HEAD:
+    range_price = _price_from_range(place)
+    if range_price is not None:
+        per_head = range_price
+        price_confidence = "confirmed"
+    elif price_level in _PRICE_LEVEL_PER_HEAD:
         per_head = _PRICE_LEVEL_PER_HEAD[price_level]
         price_confidence = "confirmed"
     else:
-        per_head = _approx_per_head_for_budget(budget_max)
+        per_head = _venue_type_estimate(query)  # independent of budget
         price_confidence = "approximate"
 
     cand = blank_candidate(
@@ -376,11 +432,11 @@ def normalize_verified_place(place: dict, query: str = "", budget_max=None) -> d
 # Public entry points
 # ---------------------------------------------------------------------------
 
-def text_search(query: str, limit: int = 8, budget_max=None) -> list:
+def text_search(query: str, limit: int = 8) -> list:
     """Verified venues for one query. Never raises. [] when disabled/unavailable.
 
-    budget_max threads the group's min budget so a price-less verified venue gets an
-    honest tier-derived estimate (marked approximate) instead of a fabricated price.
+    The per-head estimate for a price-less venue is derived from THIS query's venue
+    vocabulary (venue type), independent of the group budget.
     """
     if not is_enabled():
         return []
@@ -400,7 +456,7 @@ def text_search(query: str, limit: int = 8, budget_max=None) -> list:
 
     out = []
     for place in places:
-        cand = normalize_verified_place(place, query=query, budget_max=budget_max)
+        cand = normalize_verified_place(place, query=query)
         if cand is not None:
             out.append(cand)
     return out
@@ -415,12 +471,11 @@ def search_verified_venues(personas=None, queries=None, limit: int = 8) -> list:
     if not is_enabled():
         return []
     query_list = queries if queries else build_queries(personas, limit=4)
-    budget_min = _group_budget_min(personas)
 
     seen_ids: set = set()
     verified: list = []
     for q in query_list:
-        for cand in text_search(q, limit=limit, budget_max=budget_min):
+        for cand in text_search(q, limit=limit):
             pid = cand.get("google_place_id")
             if pid and pid in seen_ids:
                 continue
