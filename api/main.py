@@ -10,6 +10,7 @@ Run from the repo root:
 import asyncio
 import json
 import os
+from contextlib import asynccontextmanager
 
 from fastapi import Body, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,7 +18,20 @@ from fastapi.responses import JSONResponse
 
 from core import session as S
 
-app = FastAPI(title="Orkestr API", version="0.2.0")
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    # Modern replacement for the deprecated @app.on_event("startup"). Idempotently
+    # seeds ORK-001 on startup; the import-time seed below also runs it, so ORK-001
+    # exists on EVERY start path — uvicorn (lifespan runs) and TestClient used
+    # without a context manager (lifespan does NOT run; the import-time seed
+    # covers it). seed_demo() no-ops if ORK-001 already exists, so it seeds exactly
+    # once. The P0.4 mandate back-cosign lives inside seed_demo() and is unaffected.
+    S.seed_demo()
+    yield
+
+
+app = FastAPI(title="Orkestr API", version="0.2.0", lifespan=_lifespan)
 
 _cors_origins = [o.strip() for o in os.environ.get("CORS_ORIGINS", "http://localhost:3000").split(",")]
 app.add_middleware(
@@ -69,13 +83,9 @@ def _not_ready(s: dict) -> JSONResponse:
     return JSONResponse(status_code=409, content=body)
 
 
-@app.on_event("startup")
-def _startup():
-    S.seed_demo()
-
-
-# Also seed at import time so ORK-001 exists however the app is started
-# (uvicorn, TestClient, etc.). seed_demo() is idempotent.
+# Seed at import time so ORK-001 exists however the app is started (uvicorn, and
+# TestClient used without a `with` block, where the lifespan handler never runs).
+# seed_demo() is idempotent; the lifespan handler above also calls it.
 S.seed_demo()
 
 

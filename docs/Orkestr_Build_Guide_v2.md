@@ -1,6 +1,13 @@
 # Orkestr — Build Guide v2 (Unified)
 ### Build2026 · Saturday 27 June · 9:00 AM – 9:00 PM
 
+> ⚠️ **Historical build-planning doc (Build2026 era).** It describes the intended plan and
+> predates the shipped codebase — references like "14 screens", a separate `frontend/` folder,
+> `lib/api.js`, `NEXT_PUBLIC_USE_MOCK`, and `/join/…` routes are **outdated**. The real app is a
+> single Next.js app in `src/` with query-param routing (`/`, `/?room=…`, `/?room=…&member=…`).
+> For the accurate, current architecture, routes, API, env, and testing, see the root
+> [`README.md`](../README.md).
+
 > **This replaces v1.** v1 described a single scripted demo page. We changed direction:
 > we're building the **full 14-screen webapp** — Leeshan's frontend talking to a real
 > REST backend. The backend skeleton is already built, runs, and is seeded. This guide
