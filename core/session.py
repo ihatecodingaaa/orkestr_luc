@@ -400,13 +400,25 @@ def generate_real_plan(sid):
             status_code=500,
             detail="USE_REAL_SEARCH=true but GOOGLE_PLACES_API_KEY is not set")
 
-    venues, photo_name = venue_search.search_venues(
+    venues, photo_name, est_per_head = venue_search.search_venues(
         location, cuisine, budget_max, dietary, group_size, api_key)
     if not venues:
         raise HTTPException(status_code=502, detail="venue search returned no venues")
     venue = venues[0]  # top-rated real result, or first fallback venue
 
-    per_person = budget_max if isinstance(budget_max, (int, float)) else 0
+    # Per-head = the CHOSEN VENUE'S real estimated cost, capped at the group's
+    # min budget ceiling — never the raw ceiling when the venue is cheaper. A
+    # genuinely $12-18 hawker/casual venue shows ~its cost, not $45-80. Fall back
+    # to the ceiling only when no estimate is available (e.g. seed fallback), and
+    # never exceed budget_max.
+    have_budget = isinstance(budget_max, (int, float)) and not isinstance(budget_max, bool)
+    have_est = isinstance(est_per_head, (int, float)) and not isinstance(est_per_head, bool)
+    if have_est:
+        per_person = min(est_per_head, budget_max) if have_budget else est_per_head
+    elif have_budget:
+        per_person = budget_max  # conservative fallback, never above budget
+    else:
+        per_person = 0
     plan = {
         "plan_id": "REAL-" + sid,
         "title": f"{str(cuisine).title()} in {location}",

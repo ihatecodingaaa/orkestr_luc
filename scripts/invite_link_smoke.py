@@ -14,6 +14,8 @@ from urllib.parse import quote
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import paidpath_guard  # noqa: F401  (force all real-x402 spend paths off in-process)
+
 # Ensure the default path is exercised (no FRONTEND_URL configured).
 os.environ.pop("FRONTEND_URL", None)
 DEFAULT_BASE = "https://orkestr-luc.vercel.app"

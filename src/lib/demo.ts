@@ -13,6 +13,28 @@ export const DIET_OPTIONS: { id: string; label: string }[] = [
   { id: "vegan", label: "Vegan" },
 ];
 
+// Quick-pick per-head budgets. Defaults nudge toward realistic, affordable
+// numbers (hawker/casual territory) instead of everyone typing $60 — the free
+// number field still accepts any custom amount.
+export const BUDGET_CHIPS: { value: string; label: string }[] = [
+  { value: "15", label: "$15" },
+  { value: "25", label: "$25" },
+  { value: "40", label: "$40" },
+  { value: "60", label: "$60+" },
+];
+
+// Human sub-header built from a member's LIVE submitted constraints, mirroring the
+// persona "Halal · up to $60 · Friday" format so the sub-header always agrees with
+// the badges on the same card. Empty (member hasn't picked anything) -> "".
+export function constraintSummary(c: Constraints): string {
+  const diet = c.dietary.map((id) => DIET_OPTIONS.find((d) => d.id === id)?.label ?? id);
+  const parts: string[] = [];
+  if (diet.length) parts.push(diet.join(" · "));
+  if (Number(c.budget) > 0) parts.push(`up to $${c.budget}`);
+  if (c.days.length) parts.push(c.days.join("/"));
+  return parts.join(" · ");
+}
+
 export type Persona = {
   id: string;
   name: string;
