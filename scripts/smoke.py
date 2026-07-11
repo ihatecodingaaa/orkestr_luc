@@ -17,6 +17,10 @@ import urllib.error
 import urllib.request
 
 BASE = os.environ.get("BASE_URL", "http://localhost:8000").rstrip("/")
+# POST /api/dev/reseed is gated (P0.3): it needs ENABLE_DEV_RESEED=true on the
+# server and the matching secret in the X-Orkestr-Reseed-Secret header. Run this
+# smoke with both env vars set (see scripts docstring / README env checklist).
+RESEED_SECRET = os.environ.get("DEV_RESEED_SECRET", "")
 _failures = []
 
 print(f"Orkestr smoke tests — target: {BASE}")
@@ -48,6 +52,22 @@ def http(method: str, path: str, body=None):
             return e.code, None
 
 
+def reseed():
+    """POST /api/dev/reseed with the gate secret header (P0.3). Returns (status, body)."""
+    url = BASE + "/api/dev/reseed"
+    req = urllib.request.Request(
+        url, data=b"", method="POST",
+        headers={"X-Orkestr-Reseed-Secret": RESEED_SECRET})
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return resp.status, json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read())
+        except Exception:
+            return e.code, None
+
+
 def section(title: str) -> None:
     print(f"\n{'='*60}")
     print(f"  {title}")
@@ -55,9 +75,28 @@ def section(title: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Reseed gate (P0.3): with the feature enabled, a WRONG secret must 403 and must
+# NOT reseed; the correct secret (sent by reseed()) must 200. This is the local
+# validation path — run with ENABLE_DEV_RESEED=true + DEV_RESEED_SECRET set.
+# (Feature-disabled -> 404 is covered by manual QA, since this run enables it.)
+# ---------------------------------------------------------------------------
+_bad = urllib.request.Request(
+    BASE + "/api/dev/reseed", data=b"", method="POST",
+    headers={"X-Orkestr-Reseed-Secret": "definitely-wrong-secret"})
+try:
+    with urllib.request.urlopen(_bad) as _r:
+        _gate_status = _r.status
+except urllib.error.HTTPError as _e:
+    _gate_status = _e.code
+check("POST /api/dev/reseed wrong secret -> 403 (gate holds)",
+      _gate_status == 403, f"got {_gate_status}")
+
+# ---------------------------------------------------------------------------
 # Ensure pristine state before starting
 # ---------------------------------------------------------------------------
-http("POST", "/api/dev/reseed")
+_seed_status, _ = reseed()
+check("POST /api/dev/reseed correct secret -> 200 (reseeded)",
+      _seed_status == 200, f"got {_seed_status} — is ENABLE_DEV_RESEED=true and DEV_RESEED_SECRET set?")
 
 # ---------------------------------------------------------------------------
 section("READ — valid ORK-001")
@@ -151,7 +190,7 @@ check("POST /api/constraints {session_id:ORK-001, no id} -> 400 (id required)",
 section("APPROVE FLOW with unknown-member guard")
 # ---------------------------------------------------------------------------
 
-http("POST", "/api/dev/reseed")
+reseed()
 
 status, body = http("POST", "/api/approve/ORK-001", {"person_id": "P-999"})
 check("POST /api/approve/ORK-001 {P-999} -> 400 (unknown member)",
@@ -175,7 +214,7 @@ check("GET /api/status/ORK-001 -> confirmed after P-002 approves",
 section("SETTLE VALIDATION BATTERY — all must 4xx, settlement must NOT mutate")
 # ---------------------------------------------------------------------------
 
-http("POST", "/api/dev/reseed")
+reseed()
 
 _, settlement_before = http("GET", "/api/settlement/ORK-001")
 
@@ -212,7 +251,7 @@ check("Settlement unchanged after validation battery",
 section("SETTLE IDEMPOTENCY")
 # ---------------------------------------------------------------------------
 
-http("POST", "/api/dev/reseed")
+reseed()
 
 status, body = http("POST", "/api/settle/ORK-001", {"person_id": "P-004"})
 check("POST /api/settle/ORK-001 {P-004} -> 200",
@@ -291,7 +330,7 @@ check("POST /api/x402/demo-receipt/run (wrong/no secret) -> 403 or 404 (gate hol
 section("RESET + RE-PROVE")
 # ---------------------------------------------------------------------------
 
-http("POST", "/api/dev/reseed")
+reseed()
 status, body = http("GET", "/api/settlement/ORK-001")
 transfers = (body or {}).get("transfers", [])
 net = (body or {}).get("net", {})
@@ -317,7 +356,7 @@ check("After reseed: plan per_person=80",
 # ---------------------------------------------------------------------------
 # Final reseed so ORK-001 ends pristine
 # ---------------------------------------------------------------------------
-http("POST", "/api/dev/reseed")
+reseed()
 
 # ---------------------------------------------------------------------------
 print(f"\n{'='*60}")

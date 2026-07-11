@@ -64,7 +64,30 @@ export type MealSplit = {
   per_person: PerPerson[];
   unassigned_items: string[];
   totals_reconcile: boolean;
+  // Where the numbers came from (P1.3). Backend sets one of backend_live_orders /
+  // backend_session_draft; the local calculator sets local_demo_preview.
+  split_source?: string;
 };
+
+// Honest, human label for the split's provenance. Prefers the backend's
+// split_source; falls back to the coarse backend/local origin.
+export function splitSourceLabel(
+  split: MealSplit | null | undefined,
+  source: "backend" | "local",
+): string {
+  switch (split?.split_source) {
+    case "backend_live_orders":
+      return "Calculated by Orkestr backend";
+    case "backend_session_draft":
+      return "Draft itemized split";
+    case "local_demo_preview":
+      return "Demo split preview";
+    case "fallback_demo":
+      return "Local fallback";
+    default:
+      return source === "backend" ? "Calculated by Orkestr backend" : "Demo split preview";
+  }
+}
 
 const DEFAULT_CURRENCY = "SGD";
 const DEFAULT_SERVICE_CHARGE_RATE = 0.1;
@@ -290,7 +313,7 @@ export const DEMO_SPLIT_ITEMS: SplitItemInput[] = [
 ];
 
 export function demoSplit(mode: SplitMode = "itemized", members: SplitMemberInput[] = DEMO_SPLIT_MEMBERS): MealSplit {
-  return computeSplit(
+  const split = computeSplit(
     {
       currency: DEFAULT_CURRENCY,
       service_charge_rate: DEFAULT_SERVICE_CHARGE_RATE,
@@ -301,6 +324,9 @@ export function demoSplit(mode: SplitMode = "itemized", members: SplitMemberInpu
     },
     mode,
   );
+  // Local calculator — honestly labelled so it's never shown as real backend data.
+  split.split_source = "local_demo_preview";
+  return split;
 }
 
 export function fmtMoney(value: number | undefined): string {

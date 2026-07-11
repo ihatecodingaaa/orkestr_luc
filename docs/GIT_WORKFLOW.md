@@ -1,5 +1,9 @@
 # Git Workflow — Orkestr (Build2026)
 
+> ⚠️ **Historical team doc (Build2026 era).** Folder/ownership references (e.g. a separate
+> `frontend/` folder) predate the current single-repo layout — the Next.js app now lives in
+> `src/`. For the current architecture and layout, see the root [`README.md`](../README.md).
+
 > First hackathon? First time with Git? This is all you need. Keep it open on Saturday.
 > The golden rule: **pull before you start, push when you pause, stay in your own folder.**
 

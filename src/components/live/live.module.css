@@ -2672,6 +2672,185 @@
   color: var(--muted);
 }
 
+/* ---- live failure card (P1.2) ---- */
+.failCard {
+  border-color: color-mix(in srgb, #e5484d 42%, transparent);
+  background: color-mix(in srgb, #e5484d 6%, var(--panel));
+}
+.failHint {
+  margin: 0 auto 4px;
+  max-width: 40ch;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--muted-2);
+}
+.failActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: center;
+  margin-top: 20px;
+}
+.failTech {
+  margin: 16px auto 0;
+  max-width: 44ch;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted-2);
+  word-break: break-word;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--panel-strong) 60%, transparent);
+  border: 1px solid var(--border);
+}
+
+/* ---- quorum planning (P2.2) ---- */
+.quorumBar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+  border-radius: var(--ork-radius-lg);
+  background: color-mix(in srgb, var(--primary) 10%, var(--panel));
+  border: 1px solid color-mix(in srgb, var(--primary) 34%, transparent);
+}
+.quorumBarText {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.quorumBarLead {
+  font-family: var(--font-head);
+  font-size: 15px;
+}
+.quorumBarSub {
+  font-size: 13px;
+  color: var(--muted);
+  max-width: 48ch;
+  line-height: 1.5;
+}
+.quorumBarActions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.quorumBarWait {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.quorumBarWait:hover {
+  color: var(--text);
+}
+
+/* draft badge above a quorum-based final plan */
+.draftBanner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--primary) 8%, var(--panel));
+  border: 1px dashed color-mix(in srgb, var(--primary) 40%, transparent);
+}
+.draftBannerTag {
+  flex: none;
+  font-family: var(--font-head);
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #fff;
+  background: linear-gradient(135deg, var(--primary), var(--primary-2));
+  padding: 4px 10px;
+  border-radius: 999px;
+}
+.draftBannerText {
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+/* ---- re-draft "more friends replied" banner (P2 follow-up) ---- */
+.restaleBanner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-radius: var(--ork-radius-lg);
+  background: color-mix(in srgb, var(--primary-2) 12%, var(--panel));
+  border: 1px solid color-mix(in srgb, var(--primary-2) 40%, transparent);
+}
+.restaleText {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 200px;
+  flex: 1 1 240px;
+}
+.restaleTitle {
+  font-family: var(--font-head);
+  font-size: 14.5px;
+}
+.restaleBody {
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.restaleActions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+/* ---- "settle with your usual method" (P2.3) ---- */
+.settleHint {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 14px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel-strong) 55%, transparent);
+  border: 1px solid var(--border);
+}
+.settleHintLabel {
+  font-family: var(--font-head);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.settleRails {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.settleRail {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+  padding: 5px 12px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--primary) 30%, transparent);
+}
+.settleHintNote {
+  font-size: 12px;
+  color: var(--muted-2);
+}
+
 /* ================= smart itemized split ================= */
 .splitCard {
   padding: 22px 24px;
@@ -2938,6 +3117,40 @@
   display: flex;
   flex-direction: column;
 }
+.trustPillars {
+  list-style: none;
+  margin: 4px 0 8px;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 12px;
+}
+.trustPillar {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.trustPillarMark {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  font-size: 10px;
+  color: #fff;
+  background: linear-gradient(135deg, var(--primary), var(--primary-2));
+}
+.trustMoatLead {
+  margin: 2px 0 10px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--muted);
+}
 .trustRow {
   display: grid;
   grid-template-columns: 108px 1fr;
@@ -3127,6 +3340,18 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+.adapterGroupLabel {
+  font-family: var(--font-head);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted-2);
+  margin-top: 4px;
+}
+.adapterGroupFuture {
+  color: color-mix(in srgb, var(--primary-2) 70%, var(--muted-2));
 }
 .adapterRow {
   display: flex;

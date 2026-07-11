@@ -1,5 +1,9 @@
 # Orkestr — Feature Deck
 
+> ⚠️ **Historical planning doc (Build2026 era).** Some references here predate the current
+> codebase (e.g. "14 screens", a separate `frontend/` folder, `lib/api.js`, `/join/…` routes).
+> For the accurate, current architecture, routes, API, and env, see the root [`README.md`](../README.md).
+
 > The group chat that never resolves → agents negotiate the plan, book it with the
 > venue's agent, and clear the debt. **Splitwise splits after you decide; Orkestr
 > does the deciding, strikes the booking, and settles the bill.**

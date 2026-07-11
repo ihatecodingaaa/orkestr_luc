@@ -15,6 +15,19 @@ type BookingMode = {
   linkLabel?: string;
 };
 
+// A short, mode-specific title so the handoff row reads honestly ("Google Maps
+// handoff" / "Website / booking link" / "Manual booking handoff").
+function bookingTitle(b: BookingMode): string {
+  switch (b.kind) {
+    case "google_handoff":
+      return "Google Maps handoff";
+    case "web_handoff":
+      return "Website / booking link";
+    default:
+      return "Manual booking handoff";
+  }
+}
+
 function deriveBooking(v?: VenueVerification): BookingMode {
   const status = v?.verification_status;
   const maps = v?.google_maps_uri || undefined;
@@ -110,6 +123,7 @@ export function MerchantAdapterCard({ verification }: { verification?: VenueVeri
           </p>
 
           <div className={s.adapterRows}>
+            <span className={s.adapterGroupLabel}>Works today</span>
             <Row icon="✓" title={verifiedLabel} tone={status === "verified" || status === "source_only" ? "ok" : "neutral"}>
               {status === "verified"
                 ? "Real place, confirmed by Google Places (place ID + Maps link)."
@@ -120,7 +134,7 @@ export function MerchantAdapterCard({ verification }: { verification?: VenueVeri
                     : "No external verification on record."}
             </Row>
 
-            <Row icon="→" title="Booking handoff" tone="neutral">
+            <Row icon="→" title={bookingTitle(booking)} tone="neutral">
               {booking.label}
               {booking.href ? (
                 <>
@@ -132,6 +146,7 @@ export function MerchantAdapterCard({ verification }: { verification?: VenueVeri
               ) : null}
             </Row>
 
+            <span className={`${s.adapterGroupLabel} ${s.adapterGroupFuture}`}>Future rail</span>
             <Row icon="◇" title="Sandbox merchant agent" tone="future">
               Simulation only — an ACP/AP2-style acceptance that demonstrates the future
               agent-commerce rail. Not a claim that this restaurant runs an agent today.

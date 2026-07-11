@@ -144,7 +144,7 @@ export function InvitePanel({
             open from this device.
           </span>
           <span className={s.inviteGuest}>
-            Friends join as guests — no account, no wallet, no app install.
+            Friends join as guests — no account, no wallet, no app install. Under 30 seconds each.
           </span>
           {localRoom && !liveMode ? (
             <span className={s.inviteHint}>

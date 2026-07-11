@@ -110,10 +110,25 @@ export type Settlement = {
   net_after?: Record<string, number>;
 };
 
-export type StatusResponse = {
+// Additive quorum planning fields (P2.2) shared by /api/status and /public.
+export type QuorumInfo = {
+  members_total?: number;
+  replied_count?: number;
+  quorum_min?: number;
+  quorum_ready?: boolean;
+  all_ready?: boolean;
+  pending_members?: string[];
+  plan_basis?: "all_ready" | "quorum_draft" | null;
+  draft_started_with?: string[];
+  // How many friends replied AFTER the current quorum draft was created, so the
+  // presenter can fold them in. draft_stale is true when that count > 0.
+  new_replies_since_draft?: number;
+  draft_stale?: boolean;
+};
+
+export type StatusResponse = QuorumInfo & {
   phase?: string;
   ready?: string[];
-  members_total?: number;
   booking_failed?: boolean;
   fail_reason?: string | null;
   venue_status?: string | null;
@@ -155,7 +170,7 @@ export type PublicPlan = {
   } | null;
 };
 
-export type PublicSession = {
+export type PublicSession = QuorumInfo & {
   session_id: string;
   name?: string;
   live: boolean;
@@ -169,6 +184,7 @@ export type PublicSession = {
   booking_ref?: string | null;
   payment_mode?: string | null;
   booking_failed: boolean;
+  fail_reason?: string | null;
   venue_status?: string | null;
   venue_verification?: (VenueVerification & { name?: string; address?: string }) | null;
   plan?: PublicPlan | null;
@@ -184,6 +200,17 @@ export type LiveState = {
   handshake: Handshake;
   settlement: Settlement;
   venueStatus?: string | null;
+  // Failure surfaced by the status gate (quorum / no verified venue / mandate
+  // integrity). When set, the room did NOT succeed — never reveal a sample plan.
+  failReason?: string | null;
+  bookingFailed?: boolean;
+  // False when the plan isn't computed yet (status said not_ready) — the pure-read
+  // endpoints returned 409 and we did not fan out. The UI stays in waiting/working.
+  planReady?: boolean;
+  // "quorum_draft" when the plan came from a partial-quorum draft (P2.2), so the UI
+  // can label it "draft based on N of M replies". "all_ready" for a full run.
+  planBasis?: "all_ready" | "quorum_draft" | null;
+  draftStartedWith?: string[];
   checkedAt: string;
 };
 
@@ -312,6 +339,23 @@ export async function getStatus(sessionId: string): Promise<StatusResponse> {
   return fetchJson<StatusResponse>(`/api/status/${sessionId}`);
 }
 
+// P2.2 — presenter starts a QUORUM DRAFT (compute a plan from the friends who have
+// replied, without waiting for everyone). Explicit action only; the backend refuses
+// with 409 below quorum. Runs the pipeline under the P0 per-session compute lock.
+export async function startDraft(
+  sessionId: string,
+): Promise<StatusResponse & { ok?: boolean }> {
+  return fetchJson<StatusResponse & { ok?: boolean }>(`/api/session/${sessionId}/draft`, {
+    method: "POST",
+    body: "{}",
+  });
+}
+
+// Re-draft to fold in friends who replied after the first draft. Same endpoint —
+// the backend recomputes with the current replied set (and promotes to all_ready
+// once everyone is in) without re-firing any payment.
+export const updateDraft = startDraft;
+
 // Safe to poll from any device — read-only, never triggers the pipeline.
 export async function readPublicSession(sessionId: string): Promise<PublicSession> {
   return fetchJson<PublicSession>(`/api/session/${sessionId}/public`);
@@ -324,27 +368,58 @@ export async function approveTransfer(sessionId: string, personId: string): Prom
   });
 }
 
-// Reads the whole live picture in one shot once the plan is ready.
+// Like fetchJson but returns null on a 409 not_ready — a pure-read endpoint whose
+// plan isn't computed yet (P1.1). The caller renders calmly instead of throwing.
+async function fetchMaybeNotReady<T>(path: string): Promise<T | null> {
+  const response = await fetch(`${API_BASE}${path}`, {
+    cache: "no-store",
+    headers: { "Content-Type": "application/json" },
+  });
+  if (response.status === 409) return null;
+  if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+  return (await response.json()) as T;
+}
+
+// Reads the whole live picture. /api/status is the SINGLE compute gate (P1.1): we
+// call it first and only fan out to the pure-read plan/negotiation/handshake
+// endpoints once a plan is actually ready. A not_ready or failed room returns a
+// state carrying the phase/failReason so the UI branches to waiting/working/
+// failure — it never triggers a compute and never dead-ends on a raw 409.
 export async function readLiveState(sessionId: string): Promise<LiveState> {
-  const [status, negotiation, plan, handshake, settlement] = await Promise.all([
-    fetchJson<StatusResponse>(`/api/status/${sessionId}`),
-    fetchJson<Message[]>(`/api/negotiation/${sessionId}`),
-    fetchJson<Plan>(`/api/plan/${sessionId}`),
-    fetchJson<Handshake>(`/api/handshake/${sessionId}`),
-    fetchJson<Settlement>(`/api/settlement/${sessionId}`),
+  const status = await fetchJson<StatusResponse>(`/api/status/${sessionId}`);
+  const phase = status.phase ?? "unknown";
+  const checkedAt = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const planReady = phase === "plan_ready" || phase === "booking" || phase === "confirmed";
+
+  const base: LiveState = {
+    phase,
+    plan: {},
+    negotiation: [],
+    handshake: {},
+    settlement: {},
+    venueStatus: status.venue_status ?? null,
+    failReason: status.fail_reason ?? null,
+    bookingFailed: Boolean(status.booking_failed),
+    planReady,
+    planBasis: status.plan_basis ?? null,
+    draftStartedWith: status.draft_started_with ?? [],
+    checkedAt,
+  };
+  if (!planReady) return base;
+
+  const [negotiation, plan, handshake, settlement] = await Promise.all([
+    fetchMaybeNotReady<Message[]>(`/api/negotiation/${sessionId}`),
+    fetchMaybeNotReady<Plan>(`/api/plan/${sessionId}`),
+    fetchMaybeNotReady<Handshake>(`/api/handshake/${sessionId}`),
+    fetchMaybeNotReady<Settlement>(`/api/settlement/${sessionId}`),
   ]);
 
   return {
-    phase: status.phase ?? "unknown",
-    plan,
+    ...base,
+    plan: plan ?? {},
     negotiation: Array.isArray(negotiation) ? negotiation : [],
-    handshake,
-    settlement,
-    venueStatus: status.venue_status ?? null,
-    checkedAt: new Date().toLocaleTimeString([], {
-      hour: "2-digit",
-      minute: "2-digit",
-    }),
+    handshake: handshake ?? {},
+    settlement: settlement ?? {},
   };
 }
 

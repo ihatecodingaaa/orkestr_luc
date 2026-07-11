@@ -10,6 +10,7 @@ Run from the repo root:
 import asyncio
 import json
 import os
+from contextlib import asynccontextmanager
 
 from fastapi import Body, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,7 +18,20 @@ from fastapi.responses import JSONResponse
 
 from core import session as S
 
-app = FastAPI(title="Orkestr API", version="0.2.0")
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    # Modern replacement for the deprecated @app.on_event("startup"). Idempotently
+    # seeds ORK-001 on startup; the import-time seed below also runs it, so ORK-001
+    # exists on EVERY start path — uvicorn (lifespan runs) and TestClient used
+    # without a context manager (lifespan does NOT run; the import-time seed
+    # covers it). seed_demo() no-ops if ORK-001 already exists, so it seeds exactly
+    # once. The P0.4 mandate back-cosign lives inside seed_demo() and is unaffected.
+    S.seed_demo()
+    yield
+
+
+app = FastAPI(title="Orkestr API", version="0.2.0", lifespan=_lifespan)
 
 _cors_origins = [o.strip() for o in os.environ.get("CORS_ORIGINS", "http://localhost:3000").split(",")]
 app.add_middleware(
@@ -47,13 +61,31 @@ def _require_field(body: dict, field: str) -> None:
         raise HTTPException(status_code=400, detail=f"{field} required")
 
 
-@app.on_event("startup")
-def _startup():
-    S.seed_demo()
+def _not_ready(s: dict) -> JSONResponse:
+    """409 body for a read endpoint whose plan hasn't been computed yet (P1.1).
+
+    The plan/negotiation/handshake GETs are PURE READS — they never run the
+    pipeline. /api/status is the single controlled compute gate, so a direct GET or
+    a browser refresh can never advance an unready live room. fail_reason is echoed
+    when the room failed so the caller can render a failure state without a second
+    round-trip; it is already public (also on /api/status and /public)."""
+    ready = s.get("ready", []) or []
+    body = {
+        "status": "not_ready",
+        "phase": s.get("phase"),
+        "ready_count": len(ready),
+        "members_total": len(s.get("members", []) or []),
+        "message": "Plan is not ready yet.",
+    }
+    if s.get("phase") == "failed":
+        body["booking_failed"] = bool(s.get("booking_failed"))
+        body["fail_reason"] = s.get("fail_reason")
+    return JSONResponse(status_code=409, content=body)
 
 
-# Also seed at import time so ORK-001 exists however the app is started
-# (uvicorn, TestClient, etc.). seed_demo() is idempotent.
+# Seed at import time so ORK-001 exists however the app is started (uvicorn, and
+# TestClient used without a `with` block, where the lifespan handler never runs).
+# seed_demo() is idempotent; the lifespan handler above also calls it.
 S.seed_demo()
 
 
@@ -533,19 +565,28 @@ def demo_tamper_check(payload: dict = Body(default=None)):
 @app.post("/api/session/start")
 def session_start(payload: dict = Body(default={})):
     s = S.new_session(payload.get("name"), payload.get("date_range"))
-    return {"session_id": s["session_id"],
-            "invite_url": f"https://orkestr.app/join/{s['session_id']}"}
+    invite_url, _ = _invite_and_qr(s["session_id"])  # single helper (P1.4)
+    return {"session_id": s["session_id"], "invite_url": invite_url}
 
 
 # ---- QR join: a scannable invite that turns a judge's phone into a live node ----
 # No dependency/library: the QR image is rendered by api.qrserver.com. The
 # invite_url matches the format returned by /api/session/start above.
+def _frontend_base() -> str:
+    """The configured frontend origin (no trailing slash). Defaults to the real
+    Vercel domain — NEVER the dead orkestr.app placeholder (P1.4)."""
+    return os.environ.get("FRONTEND_URL", "https://orkestr-luc.vercel.app").rstrip("/")
+
+
 def _invite_and_qr(sid: str):
-    """Return (invite_url, qr_url) for a session id. qr_url is a ready-to-embed
-    api.qrserver.com PNG encoding the invite_url (URL-encoded into the data param)."""
+    """Return (invite_url, qr_url) for a session id — the SINGLE source of truth for
+    every invite link (start, live, invite, QR, clone). The invite URL uses the
+    real app's query-param route (`/?room=<sid>`), matching the frontend router and
+    presenterLink(); the old `/join/<sid>` path had no page. qr_url is a
+    ready-to-embed api.qrserver.com PNG encoding the invite_url."""
     from urllib.parse import quote
 
-    invite_url = f"{os.environ.get('FRONTEND_URL', 'https://orkestr-luc.vercel.app')}/join/{sid}"
+    invite_url = f"{_frontend_base()}/?room={quote(sid, safe='')}"
     qr_url = ("https://api.qrserver.com/v1/create-qr-code/?data="
               + quote(invite_url, safe="") + "&size=300x300&format=png")
     return invite_url, qr_url
@@ -577,9 +618,10 @@ def session_live(payload: dict = Body(default={})):
     live and presses find-our-plan. The pipeline runs only once all 5 are ready.
     """
     s = S.new_live_session(payload.get("name"), payload.get("date_range"))
+    invite_url, _ = _invite_and_qr(s["session_id"])  # single helper (P1.4)
     return {
         "session_id": s["session_id"],
-        "invite_url": f"https://orkestr.app/join/{s['session_id']}",
+        "invite_url": invite_url,
         "members": [{"id": m["id"], "name": m["name"], "avatar": m.get("avatar")}
                     for m in s["members"]],
     }
@@ -633,19 +675,40 @@ def member_prefs(member_id: str):
 @app.get("/api/status/{sid}")
 def status(sid: str):
     s = _require_session(sid)
+    # Additive quorum report (P2.2) — pure read, never computes. Lets the presenter
+    # see quorum readiness without drafting; the explicit POST /draft is the only
+    # quorum compute trigger.
+    q = S.quorum_report(s)
     if s["phase"] == "negotiating":
-        # Live sessions wait until all 5 members press find-our-plan; everyone
-        # else (incl. ORK-001) keeps the original lazy-compute behaviour.
+        # Live sessions wait until ALL members press find-our-plan before the lazy
+        # auto-compute; a quorum draft is a separate, explicit presenter action
+        # (POST /api/session/{sid}/draft) and never auto-fires here. Everyone else
+        # (incl. ORK-001) keeps the original lazy-compute behaviour.
         if s.get("live") and not S.all_ready(s):
             return {"phase": s["phase"],
                     "ready": s.get("ready", []),
-                    "members_total": len(s["members"])}
+                    **q}
         S.compute_plan(sid)  # lazily produce the plan -> plan_ready
+        q = S.quorum_report(s)  # refresh plan_basis now that a plan exists
     if s["phase"] == "failed":
         return {"phase": "failed", "booking_failed": True,
                 "fail_reason": s.get("fail_reason"),
-                "venue_status": s.get("venue_status")}
-    return {"phase": s["phase"], "venue_status": s.get("venue_status")}
+                "venue_status": s.get("venue_status"), **q}
+    return {"phase": s["phase"], "venue_status": s.get("venue_status"), **q}
+
+
+@app.post("/api/session/{sid}/draft")
+def session_draft(sid: str):
+    """P2.2 — presenter starts a QUORUM DRAFT once enough friends have replied,
+    instead of waiting for everyone. Explicit trigger only (GETs never compute).
+    400 if not a live session; 409 if quorum isn't reached yet. Idempotent for the
+    same reply set. Runs under the P0 per-session compute lock."""
+    _require_session(sid)
+    s = S.draft_plan(sid)
+    return {"ok": True, "phase": s.get("phase"),
+            "plan_basis": s.get("plan_basis"),
+            "draft_started_with": s.get("draft_started_with") or [],
+            **S.quorum_report(s)}
 
 
 @app.get("/api/session/{sid}/public")
@@ -748,9 +811,15 @@ def session_public(sid: str):
         "booking_ref": plan.get("booking_ref") if plan else None,
         "payment_mode": payment_mode,
         "booking_failed": bool(s.get("booking_failed")),
+        # Public, user-safe failure reason so a phone can render the failure state
+        # without a second round-trip (already exposed on /api/status). No secrets.
+        "fail_reason": s.get("fail_reason"),
         "venue_status": s.get("venue_status"),
         "venue_verification": venue_verification,
         "plan": plan_summary,
+        # Additive quorum state (P2.2) so the waiting room can show honest progress
+        # ("3 of 5 replied") and label a quorum-based plan as a draft. No secrets.
+        **S.quorum_report(s),
     }
     # Public fresh x402 receipt auto-fired at booking time (core.session
     # _maybe_fire_x402_receipt). Additive: only present when a real receipt with a
@@ -773,18 +842,21 @@ def session_plan(sid: str):
 
 @app.get("/api/plan/{sid}")
 def plan(sid: str):
+    """PURE READ (P1.1): never computes. 409 not_ready if the plan isn't ready.
+    /api/status is the compute gate; ORK-001 is precomputed so it returns 200."""
     s = _require_session(sid)
-    if not s["plan"]:
-        S.compute_plan(sid)
+    if not s.get("plan"):
+        return _not_ready(s)
     return s["plan"]
 
 
 @app.get("/api/negotiation/{sid}")
 def negotiation(sid: str):
-    """NEW — feeds the negotiation RING on /waiting (Act 1 money shot)."""
+    """Negotiation transcript. PURE READ (P1.1): never computes; 409 not_ready
+    until the plan is computed via /api/status."""
     s = _require_session(sid)
-    if not s["negotiation"]:
-        S.compute_plan(sid)
+    if not s.get("negotiation"):
+        return _not_ready(s)
     return s["negotiation"]
 
 
@@ -801,10 +873,11 @@ def approve(sid: str, body: dict = Body(...)):
 
 @app.get("/api/handshake/{sid}")
 def handshake(sid: str):
-    """Full request -> counter -> mandate, so /confirmed can show the exchange (Act 2)."""
+    """Full request -> counter -> mandate, so /confirmed can show the exchange (Act 2).
+    PURE READ (P1.1): never computes; 409 not_ready until computed via /api/status."""
     s = _require_session(sid)
-    if not s["handshake"]:
-        S.compute_plan(sid)
+    if not s.get("handshake"):
+        return _not_ready(s)
     return s["handshake"]
 
 
@@ -870,19 +943,37 @@ def settle_ep(sid: str, body: dict = Body(default={})):
 
 @app.get("/api/split/{sid}")
 def split(sid: str, mode: str = "itemized"):
-    """Smart itemized meal split for the session (demo-state).
+    """Smart itemized meal split for THIS session (P1.3 — session-linked).
 
     Orkestr pays the merchant ONCE over x402; this is the internal settlement —
     each friend's share from what they actually ordered, shared dishes split only
     among the friends who joined them, service charge + GST allocated fairly.
-    Never triggers a payment. mode = "itemized" (default) or "equal".
+    Computed from the room's own members + orders (a session-linked draft is
+    initialised on first read if none exist), NOT global canned data. The response
+    carries an additive `split_source` so the UI can label it honestly. Never
+    triggers a payment. mode = "itemized" (default) or "equal".
     """
     _require_session(sid)
     if mode not in ("itemized", "equal"):
         raise HTTPException(status_code=400, detail="mode must be 'itemized' or 'equal'")
-    from core.meal_split import demo_meal_split
+    split_data, _ = S.get_session_split(sid, mode)
+    return split_data
 
-    return demo_meal_split(mode=mode)
+
+@app.post("/api/split/{sid}/orders")
+def split_orders(sid: str, body: dict = Body(default={}), mode: str = "itemized"):
+    """Replace THIS session's orders (presenter edit / captured order) and return the
+    recomputed split. Body: {"items": [{id,name,price,quantity,assigned_to,shared_by,
+    category}]}. Item members are validated against the room; the split then reports
+    split_source="backend_live_orders". Pure math — never triggers a payment."""
+    _require_session(sid)
+    if mode not in ("itemized", "equal"):
+        raise HTTPException(status_code=400, detail="mode must be 'itemized' or 'equal'")
+    items = body.get("items")
+    if not isinstance(items, list):
+        raise HTTPException(status_code=400, detail="items (list) required")
+    split_data, _ = S.set_session_orders(sid, items, mode)
+    return split_data
 
 
 @app.post("/api/discovery/venues")
@@ -908,7 +999,23 @@ def discovery_venues(body: dict = Body(default={})):
 
 
 @app.post("/api/dev/reseed")
-def dev_reseed():
+def dev_reseed(x_reseed_secret: str = Header(default=None, alias="X-Orkestr-Reseed-Secret")):
+    """Restore ORK-001 to its frozen seeded values. Gated exactly like the x402
+    demo endpoints so it is not a public unauthenticated reset in production:
+      1. ENABLE_DEV_RESEED must be exactly "true"       -> else 404 (hidden)
+      2. X-Orkestr-Reseed-Secret must equal DEV_RESEED_SECRET (constant-time) -> else 403
+    The secret is never logged or echoed.
+    """
+    import hmac
+
+    if os.environ.get("ENABLE_DEV_RESEED", "").strip() != "true":
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    expected = os.environ.get("DEV_RESEED_SECRET", "").strip()
+    provided = (x_reseed_secret or "").strip()
+    if not expected or not hmac.compare_digest(provided, expected):
+        raise HTTPException(status_code=403, detail="forbidden")
+
     S.delete_session("ORK-001")  # drop from cache + SQLite, then re-seed fresh
     S.seed_demo()
     return {"ok": True}

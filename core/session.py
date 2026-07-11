@@ -18,13 +18,51 @@ from fastapi import HTTPException
 from agents.convener import (generate_candidates, run_negotiation, strike_booking,
                              _seeded_messages)
 from core import db
+from core.meal_split import _money, _to_cents, allocate_cents
 from core.settlement import compute_net, simplify
 from payments.x402 import stamp
 
 DATA = os.path.join(os.path.dirname(__file__), "..", "data")
 PHASES = ["negotiating", "plan_ready", "booking", "confirmed"]
+# Quorum planning (P2.2): a live room may draft a plan once at least this many
+# members have replied — the host doesn't have to wait for everyone. This is a
+# minimum to DRAFT; the all-ready path is unchanged.
+QUORUM_MIN = 3
 
 LOGGER = logging.getLogger(__name__)
+
+# Per-session compute locks. compute_plan runs the negotiation/booking pipeline
+# and spawns the x402 receipt daemon; without a lock two devices/tabs hitting the
+# same room could compute twice and double-spawn. The registry itself is guarded
+# by a meta-lock (double-checked creation) so the lock objects are process-stable.
+_COMPUTE_LOCKS = {}
+_COMPUTE_LOCKS_META = threading.Lock()
+
+
+def _compute_lock(sid):
+    """Return the process-stable threading.Lock for this session id."""
+    with _COMPUTE_LOCKS_META:
+        lock = _COMPUTE_LOCKS.get(sid)
+        if lock is None:
+            lock = threading.Lock()
+            _COMPUTE_LOCKS[sid] = lock
+        return lock
+
+
+def _spawn_x402_receipt_once(s, sid):
+    """Spawn the x402 receipt daemon AT MOST ONCE per session.
+
+    Check-and-set on a persisted `_x402_fired` flag (set under the per-sid compute
+    lock at every call site inside compute_plan) so concurrent triggers — or the
+    budget-guard path that runs generate_real_plan and then falls through — can
+    never spawn two receipt daemons for one session. _maybe_fire_x402_receipt keeps
+    its own guards too (ORK-001 skip, existing-receipt skip); this is the outer belt.
+    """
+    if s.get("_x402_fired"):
+        return
+    s["_x402_fired"] = True
+    db.set_session(sid, s)  # persist the flag before spawning
+    threading.Thread(target=_maybe_fire_x402_receipt, args=(s, sid), daemon=True).start()
 
 
 def _load(name):
@@ -84,6 +122,7 @@ def new_live_session(name=None, date_range=None):
     s["members"] = shells
     s["live"] = True
     s["ready"] = []
+    s["quorum_min"] = QUORUM_MIN  # P2.2: draft allowed once this many reply
     db.set_session(s["session_id"], s)  # write-through AFTER mutation
     return s
 
@@ -144,6 +183,68 @@ def all_ready(s):
     if not member_ids:
         return False
     return member_ids.issubset(set(s.get("ready", [])))
+
+
+# ---------------------------------------------------------------------------
+# Quorum planning (P2.2). "Replied" = a member who pressed find-our-plan (in the
+# ready list). Non-live sessions (ORK-001, scratch) are treated as fully replied
+# since they are not gated on live readiness. All helpers are pure reads.
+# ---------------------------------------------------------------------------
+
+def _member_ids(s):
+    return [m["id"] for m in s.get("members", [])
+            if isinstance(m, dict) and m.get("id")]
+
+
+def quorum_min(s):
+    """Configured minimum replies to draft (defaults to QUORUM_MIN)."""
+    v = s.get("quorum_min")
+    return v if isinstance(v, int) and v > 0 else QUORUM_MIN
+
+
+def replied_ids(s):
+    """Member ids who have replied. Non-live sessions count as fully replied."""
+    ids = _member_ids(s)
+    if not s.get("live"):
+        return list(ids)
+    ready = set(s.get("ready", []))
+    return [mid for mid in ids if mid in ready]
+
+
+def pending_ids(s):
+    """Member ids who have NOT replied yet (empty for non-live sessions)."""
+    replied = set(replied_ids(s))
+    return [mid for mid in _member_ids(s) if mid not in replied]
+
+
+def quorum_report(s):
+    """Additive, public quorum status for /api/status and /public. Never computes."""
+    total = len(_member_ids(s))
+    replied = replied_ids(s)
+    replied_count = len(replied)
+    # A quorum draft always records plan_basis explicitly; any other existing plan
+    # is a normal all-ready plan (covers ORK-001 and sessions seeded before P2.2).
+    plan_basis = s.get("plan_basis")
+    if plan_basis is None and s.get("plan"):
+        plan_basis = "all_ready"
+    # Stale-draft indicator (P2 follow-up): how many members replied AFTER this
+    # quorum draft was created, so the presenter can fold them in. Only meaningful
+    # for an existing quorum draft; an all-ready plan is never "stale".
+    drafted = s.get("draft_started_with") or []
+    has_quorum_draft = plan_basis == "quorum_draft" and len(drafted) > 0
+    new_since = max(0, replied_count - len(drafted)) if has_quorum_draft else 0
+    return {
+        "members_total": total,
+        "replied_count": replied_count,
+        "quorum_min": quorum_min(s),
+        "quorum_ready": total > 0 and replied_count >= quorum_min(s),
+        "all_ready": total > 0 and replied_count == total,
+        "pending_members": pending_ids(s),
+        "plan_basis": plan_basis,
+        "draft_started_with": drafted,
+        "new_replies_since_draft": new_since,
+        "draft_stale": new_since > 0,
+    }
 
 
 def add_constraints(sid, person):
@@ -338,7 +439,7 @@ def generate_real_plan(sid):
     # Non-blocking: fire one real x402 receipt in the background so the plan
     # response returns immediately. The daemon thread persists the receipt itself
     # (see _maybe_fire_x402_receipt); /public delivers it to the UI once it lands.
-    threading.Thread(target=_maybe_fire_x402_receipt, args=(s, sid), daemon=True).start()
+    _spawn_x402_receipt_once(s, sid)
     return plan
 
 
@@ -360,12 +461,40 @@ def _no_verified_venue(s):
     return s
 
 
-def compute_plan(sid):
-    """Negotiation -> plan -> venue handshake. Moves phase to plan_ready."""
+def compute_plan(sid, member_ids=None):
+    """Negotiation -> plan -> venue handshake. Moves phase to plan_ready.
+
+    Serialized per session: two concurrent callers (two devices/tabs polling the
+    same room) can't run the pipeline twice or double-spawn the receipt daemon.
+    The second caller waits on the lock, then no-ops if a plan already landed.
+
+    member_ids (P2.2 quorum draft): when given, ONLY those members' constraints
+    enter negotiation — pending members are excluded, never fabricated. None (the
+    default, all-ready path) uses every member and is byte-for-byte the old flow.
+    """
+    s = db.get_session(sid)
+    if s is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    with _compute_lock(sid):
+        # Re-read under the lock: another caller may have computed while we waited.
+        s = db.get_session(sid)
+        if s is None:
+            raise HTTPException(status_code=404, detail="session not found")
+        if s.get("plan") and s.get("phase") in ("plan_ready", "booking", "confirmed"):
+            return s
+        return _compute_plan_body(sid, member_ids=member_ids)
+
+
+def _compute_plan_body(sid, member_ids=None):
+    """The actual compute pipeline. Always called while holding _compute_lock(sid)."""
     s = db.get_session(sid)
     if s is None:
         raise HTTPException(status_code=404, detail="session not found")
     members = _members(s)
+    # Quorum draft: restrict negotiation to the members who actually replied.
+    if member_ids is not None:
+        subset = set(member_ids)
+        members = [m for m in members if isinstance(m, dict) and m.get("id") in subset]
     seed_venues = _load("venues.json")
 
     from agents.venue_grounding import (
@@ -455,6 +584,29 @@ def compute_plan(sid):
     from payments.x402_protocol import is_live_real_x402_enabled
     allow_x402 = bool(s.get("live")) and is_live_real_x402_enabled()
     booking = strike_booking(s["plan"], allow_x402=allow_x402)
+
+    # AP2 tamper gate (P0.4): before ANY handshake-success state is written and
+    # before the x402 receipt daemon can spawn, verify the co-signed mandate's cart
+    # digest. strike_booking's normal ACP path returns a co-signed mandate WITHOUT a
+    # cart_digest, so we bind one now from the mandate's own items (cosign computes
+    # the same SHA-256). A mandate that ALREADY carries a digest is left untouched —
+    # so a cart altered after signing (digest no longer matches items) fails verify()
+    # and the booking is refused with no payment. Non-co-signed mandates (e.g. an
+    # x402 controlled-failure) are a different failure mode and skip this gate.
+    from payments.mandate import cosign, verify
+    mandate = booking["mandate"]
+    if mandate.get("status") == "co-signed":
+        if not mandate.get("cart_digest"):
+            mandate["cart_digest"] = cosign(
+                mandate, mandate.get("merchant", "unknown"))["cart_digest"]
+        if not verify(mandate):
+            s["handshake"] = None
+            s["booking_failed"] = True
+            s["fail_reason"] = "mandate integrity check failed"
+            s["phase"] = "failed"
+            db.set_session(sid, s)  # write-through (tamper block; no receipt fires)
+            return s
+
     s["handshake"] = {
         "request": booking["request"],
         "response": booking["response"],
@@ -465,11 +617,16 @@ def compute_plan(sid):
     }
     if s["phase"] in ("negotiating", "failed"):
         s["phase"] = "plan_ready"
+    # Record how this plan was reached (P2.2): a quorum draft vs the full all-ready
+    # run. Additive — the UI labels a draft honestly; all-ready plans are unlabelled.
+    s["plan_basis"] = "quorum_draft" if member_ids is not None else "all_ready"
     # Live sessions have no seeded expenses, so x402 would have nothing to
     # settle. Treat the venue booking the Convener (first member) struck over
-    # ACP as a fronted expense, split evenly — that's what x402 reimburses.
+    # ACP as a fronted expense, split evenly — that's what x402 reimburses. For a
+    # quorum draft this splits among the members actually included in the draft.
     if s.get("live") and not s.get("_booking_expense_added"):
-        members = _members(s)
+        members = [m for m in _members(s)
+                   if member_ids is None or (isinstance(m, dict) and m.get("id") in set(member_ids))]
         total = (s["plan"] or {}).get("total_cost") or 0
         if members and total:
             s["_booking_expense_added"] = True
@@ -519,7 +676,60 @@ def compute_plan(sid):
     # Non-blocking: fire one real x402 receipt in the background so the plan
     # response returns immediately. The daemon thread persists the receipt itself
     # (see _maybe_fire_x402_receipt); /public delivers it to the UI once it lands.
-    threading.Thread(target=_maybe_fire_x402_receipt, args=(s, sid), daemon=True).start()
+    _spawn_x402_receipt_once(s, sid)
+    return s
+
+
+def draft_plan(sid):
+    """P2.2 — presenter-triggered QUORUM DRAFT. Explicit POST only (never a GET
+    side effect). Computes a plan from the members who have replied so far, once
+    quorum is met, WITHOUT waiting for everyone. Refuses below quorum. Idempotent
+    for the same reply set; re-runs (recomputes) when more members have since
+    replied so a late joiner is honestly included.
+
+    Raises: 404 unknown session, 400 non-live session, 409 below quorum.
+    """
+    s = db.get_session(sid)
+    if s is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    if not s.get("live"):
+        raise HTTPException(status_code=400,
+                            detail="draft is only available for live sessions")
+    replied = replied_ids(s)
+    if len(replied) < quorum_min(s):
+        raise HTTPException(
+            status_code=409,
+            detail=(f"quorum not reached: {len(replied)} of {len(_member_ids(s))} replied "
+                    f"(need {quorum_min(s)})"))
+
+    # Idempotent: same reply set + an existing draft -> return it unchanged (no
+    # recompute, no payment churn). Re-drafting with MORE repliers falls through.
+    has_plan = bool(s.get("plan")) and s.get("phase") in ("plan_ready", "booking", "confirmed")
+    if has_plan and sorted(s.get("draft_started_with") or []) == sorted(replied):
+        return s
+
+    # Everyone has now replied -> use the standard all-ready path (member_ids=None)
+    # and tag it all_ready; otherwise draft with just the replied subset.
+    full = len(replied) == len(_member_ids(s))
+
+    # (Re)draft. Clear any prior plan so the compute lock's double-check recomputes;
+    # keep the one-shot x402 guard intact — we NEVER reset _x402_fired, so a re-draft
+    # can never spawn a second receipt daemon or re-fire a payment.
+    s["plan"] = None
+    s["negotiation"] = None
+    s["handshake"] = None
+    s["phase"] = "negotiating"
+    s["booking_failed"] = False
+    s["fail_reason"] = None
+    s["draft_started_with"] = list(replied)
+    db.set_session(sid, s)  # write-through before recompute
+    compute_plan(sid, member_ids=None if full else replied)
+    s = db.get_session(sid)
+    # Keep the draft provenance even if the compute path failed (quorum/no venue).
+    s["draft_started_with"] = list(replied)
+    if s.get("phase") != "failed":
+        s["plan_basis"] = "all_ready" if full else "quorum_draft"
+    db.set_session(sid, s)
     return s
 
 
@@ -566,24 +776,35 @@ def recompute_settlement(sid):
     if s is None:
         raise HTTPException(status_code=404, detail="session not found")
     ids = [m["id"] for m in _members(s)]
+    # All settlement math runs in INTEGER CENTS so no penny leaks in rounding
+    # (the old `per = round(total/len(ids))` dropped the remainder — $401/5 lost
+    # $1). We convert to cents at the boundary, distribute the equal share with the
+    # cent-exact largest-remainder allocator from core.meal_split, run the untouched
+    # compute_net/simplify on those ints (their `== 0` checks are then exact), and
+    # convert back to dollars only for the stored response.
     if s.get("_fronted_override"):
-        fronted = {pid: s["_fronted_override"].get(pid, 0) for pid in ids}
+        fronted_cents = {pid: _to_cents(s["_fronted_override"].get(pid, 0)) for pid in ids}
     else:
-        fronted = {pid: 0 for pid in ids}
+        fronted_cents = {pid: 0 for pid in ids}
         for e in s["expenses"]:
-            fronted[e["paid_by"]] = fronted.get(e["paid_by"], 0) + e["amount"]
-    total = sum(fronted.values())
-    per = round(total / len(ids)) if ids else 0
-    shares = {pid: per for pid in ids}
-    net = compute_net(fronted, shares)
+            fronted_cents[e["paid_by"]] = fronted_cents.get(e["paid_by"], 0) + _to_cents(e["amount"])
+    total_cents = sum(fronted_cents.values())
+    # Equal share, distributed by largest remainder over members ordered by id
+    # ascending (deterministic tie-break). sum(shares) == total_cents EXACTLY.
+    order = sorted(ids)
+    share_list = allocate_cents([1] * len(order), total_cents) if order else []
+    share_by_id = {pid: share_list[i] for i, pid in enumerate(order)}
+    shares_cents = {pid: share_by_id.get(pid, 0) for pid in ids}
+    net_cents = compute_net(fronted_cents, shares_cents)  # ints -> sums to exactly 0
     transfers = [
-        {**t, "rail": "x402", "status": "pending", "tx_hash": None, "latency_ms": 1000}
-        for t in simplify(net)
+        {**t, "amount": _money(t["amount"]), "rail": "x402", "status": "pending",
+         "tx_hash": None, "latency_ms": 1000}
+        for t in simplify(net_cents)  # greedy min-cash-flow on integer cents
     ]
     s["settlement"] = {
-        "fronted": fronted,
-        "shares": shares,
-        "net": net,
+        "fronted": {pid: _money(fronted_cents[pid]) for pid in ids},
+        "shares": {pid: _money(shares_cents[pid]) for pid in ids},
+        "net": {pid: _money(net_cents.get(pid, 0)) for pid in ids},
         "transfers": transfers,
         "net_after": {pid: 0 for pid in ids},
     }
@@ -602,6 +823,142 @@ def approve_transfer(sid, person_id):
             t["tx_hash"] = stamp()
     db.set_session(sid, s)  # write-through AFTER mutation
     return s
+
+
+# ---------------------------------------------------------------------------
+# Session-linked meal split (P1.3). The Orkestr agent wallet pays the merchant
+# ONCE over x402; this computes the internal per-person settlement from THIS
+# room's members + orders. Pure math (core.meal_split) — never a payment, never
+# the pipeline. Distinct from recompute_settlement (which nets whole expenses).
+# ---------------------------------------------------------------------------
+
+# A small realistic menu the session DRAFT draws from, rotated per session so two
+# different rooms get different draft orders (never one global canned split).
+_DRAFT_MENU = [
+    ("Bibimbap", 18.0),
+    ("Bulgogi set", 24.0),
+    ("Japchae (v)", 16.0),
+    ("Soft tofu stew", 15.0),
+    ("Kimchi fried rice", 14.0),
+    ("Seafood pancake", 20.0),
+    ("Spicy ramen", 17.0),
+    ("Bibim naengmyeon", 16.5),
+]
+_DRAFT_SHARED = ("Table BBQ platter", 60.0)
+_DRAFT_SIDE = ("Kimchi & banchan", 12.0)
+
+
+def _split_members(s):
+    """meal_split member rows from the session's members (+ their stated budget)."""
+    rows = []
+    for m in _members(s):
+        if not isinstance(m, dict) or not m.get("id"):
+            continue
+        c = m.get("constraints") or {}
+        b = c.get("budget_max")
+        row = {"member_id": m["id"], "name": m.get("name", m["id"])}
+        if isinstance(b, (int, float)) and not isinstance(b, bool) and b > 0:
+            row["budget"] = float(b)
+        rows.append(row)
+    return rows
+
+
+def _draft_orders(s):
+    """A realistic, session-linked DRAFT order tied to THIS room's members.
+
+    Each member gets one personal main (chosen by a per-session rotation so two
+    different rooms differ), and everyone shares a BBQ platter + banchan. Stored on
+    the session so it is stable + editable — never a detached global canned split.
+    """
+    import zlib
+
+    ids = [m["member_id"] for m in _split_members(s)]
+    if not ids:
+        return []
+    rot = zlib.crc32((s.get("session_id") or "").encode()) % len(_DRAFT_MENU)
+    items = []
+    for i, mid in enumerate(ids):
+        name, price = _DRAFT_MENU[(rot + i) % len(_DRAFT_MENU)]
+        items.append({
+            "id": f"draft-main-{mid}", "name": name, "price": price, "quantity": 1,
+            "assigned_to": [mid], "shared_by": [], "category": "personal",
+        })
+    sname, sprice = _DRAFT_SHARED
+    items.append({
+        "id": "draft-shared-platter", "name": sname, "price": sprice, "quantity": 1,
+        "assigned_to": [], "shared_by": list(ids), "category": "shared",
+    })
+    bname, bprice = _DRAFT_SIDE
+    items.append({
+        "id": "draft-shared-banchan", "name": bname, "price": bprice, "quantity": 1,
+        "assigned_to": [], "shared_by": list(ids), "category": "shared",
+    })
+    return items
+
+
+def get_session_split(sid, mode="itemized"):
+    """Compute the itemized split for THIS session. Returns (split_dict, source).
+
+    Real captured orders -> "backend_live_orders". Otherwise a session-linked draft
+    is initialised (stored on the session) and used -> "backend_session_draft".
+    Pure math — never runs the pipeline or a payment.
+    """
+    from core.meal_split import compute_split
+
+    s = db.get_session(sid)
+    if s is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    orders = s.get("orders")
+    if isinstance(orders, list) and orders and not s.get("orders_are_draft"):
+        source = "backend_live_orders"
+    else:
+        if not (isinstance(orders, list) and orders):
+            orders = _draft_orders(s)
+            s["orders"] = orders
+            s["orders_are_draft"] = True
+            db.set_session(sid, s)  # persist the draft so it is stable + editable
+        source = "backend_session_draft"
+    split = compute_split({"members": _split_members(s), "items": orders, "mode": mode}, mode=mode)
+    split["split_source"] = source
+    return split, source
+
+
+def set_session_orders(sid, items, mode="itemized"):
+    """Replace the session's orders with an explicit (edited/captured) order set and
+    return the recomputed split. Validates item members; marks orders as real (not a
+    draft) so subsequent splits report "backend_live_orders". Never a payment."""
+    from core.meal_split import compute_split
+
+    s = db.get_session(sid)
+    if s is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    member_ids = {m["member_id"] for m in _split_members(s)}
+    clean = []
+    for it in (items or []):
+        if not isinstance(it, dict):
+            raise HTTPException(status_code=400, detail="each item must be an object")
+        assigned = [p for p in (it.get("assigned_to") or []) if p in member_ids]
+        shared = [p for p in (it.get("shared_by") or []) if p in member_ids]
+        try:
+            price = float(it.get("price", 0))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="item price must be numeric")
+        category = "shared" if (it.get("category") == "shared" or (shared and not assigned)) else "personal"
+        clean.append({
+            "id": str(it.get("id") or f"item-{len(clean) + 1}"),
+            "name": str(it.get("name") or "Item"),
+            "price": price,
+            "quantity": int(it.get("quantity") or 1),
+            "assigned_to": assigned,
+            "shared_by": shared,
+            "category": category,
+        })
+    s["orders"] = clean
+    s["orders_are_draft"] = False
+    db.set_session(sid, s)  # write-through AFTER mutation
+    split = compute_split({"members": _split_members(s), "items": clean, "mode": mode}, mode=mode)
+    split["split_source"] = "backend_live_orders"
+    return split, "backend_live_orders"
 
 
 def seed_demo():
@@ -652,6 +1009,15 @@ def seed_demo():
         "conflicts": [],
     }
     booking = strike_booking(seeded_plan)
+    # Back-cosign the seeded mandate (P0.4): strike_booking's ACP path omits the
+    # cart_digest, so bind one now from its own items. ORK-001 then genuinely passes
+    # mandate.verify() and displays co-signed + verified. Additive only — Seoul
+    # Garden / per_person 80 / booking_ref / status "co-signed" are all unchanged.
+    from payments.mandate import cosign as _cosign
+    _seeded_mandate = booking["mandate"]
+    if _seeded_mandate.get("status") == "co-signed" and not _seeded_mandate.get("cart_digest"):
+        _seeded_mandate["cart_digest"] = _cosign(
+            _seeded_mandate, _seeded_mandate.get("merchant", "Seoul Garden"))["cart_digest"]
     s["negotiation"] = _seeded_messages()
     s["plan"] = seeded_plan
     # Grade the seeded venue as a labeled sample (demo). Additive — keeps the

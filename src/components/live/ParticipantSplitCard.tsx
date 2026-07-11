@@ -1,4 +1,4 @@
-import { fmtMoney } from "@/lib/split";
+import { fmtMoney, splitSourceLabel } from "@/lib/split";
 import type { MealSplit } from "@/lib/split";
 import type { SplitSource } from "@/lib/useRoom";
 import s from "./live.module.css";
@@ -27,7 +27,7 @@ export function ParticipantSplitCard({
           <span className={s.stageKicker}>Your share</span>
           <h3 className={s.splitTitle}>{myName ?? me.name} owes {fmtMoney(me.total)}</h3>
           <span className={s.splitSourceBadge} data-source={source}>
-            {source === "backend" ? "Calculated by Orkestr backend" : "Demo split preview"}
+            {splitSourceLabel(split, source)}
           </span>
         </div>
         <span className={s.splitTotal}>{fmtMoney(split.total)} bill</span>
@@ -76,9 +76,22 @@ export function ParticipantSplitCard({
         </p>
       ) : null}
 
+      <div className={s.settleHint}>
+        <span className={s.settleHintLabel}>Settle with your usual method</span>
+        <div className={s.settleRails}>
+          {["PayNow", "Venmo", "Mark as paid"].map((r) => (
+            <span key={r} className={s.settleRail}>
+              {r}
+            </span>
+          ))}
+        </div>
+        <span className={s.settleHintNote}>Common rails — no wallet or crypto needed.</span>
+      </div>
+
       <p className={s.splitNote}>
-        You only pay for your own items and the shared dishes you joined. Orkestr paid the
-        merchant once — no wallet, no crypto, no extra fees for you.
+        You only pay for your own items and the shared dishes you joined. No wallet, no MetaMask,
+        no crypto — Orkestr&apos;s Agent Wallet paid the merchant once behind the scenes, and you
+        settle your share the way you already do.
       </p>
     </div>
   );
