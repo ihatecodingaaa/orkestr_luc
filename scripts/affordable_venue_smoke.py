@@ -108,13 +108,42 @@ os.environ["USE_EXA"] = "false"
 import agents.google_places as GP  # noqa: E402
 from core import session as S  # noqa: E402
 
-# Regression: the fabricated flat price is gone and not replaced by another fixed
-# fake number; the estimator is tier-derived and capped at budget.
+# Regression: NO budget-derived estimate. Both the old flat $45 and the budget-tier
+# estimator are gone; the estimate is an INDEPENDENT venue signal, not the budget.
 check("_DEFAULT_PER_HEAD removed from agents.google_places", not hasattr(GP, "_DEFAULT_PER_HEAD"))
-check("approx estimate is tier-derived, not a flat 45 (budget 15 -> 15)",
-      GP._approx_per_head_for_budget(15) == 15, str(GP._approx_per_head_for_budget(15)))
-check("approx estimate never exceeds budget (budget 15 -> <=15)",
-      GP._approx_per_head_for_budget(15) <= 15)
+check("budget-derived estimator removed (_approx_per_head_for_budget gone)",
+      not hasattr(GP, "_approx_per_head_for_budget"))
+check("normalize no longer accepts a budget_max param (price != budget by construction)",
+      "budget_max" not in __import__("inspect").signature(GP.normalize_verified_place).parameters)
+# Venue-type estimate is a property of the venue TYPE (query vocab), independent of
+# budget: a private-dining query estimates expensive, a hawker query cheap.
+check("venue-type estimate: hawker -> ~12", GP._venue_type_estimate("halal hawker centre Singapore") == 12,
+      str(GP._venue_type_estimate("halal hawker centre Singapore")))
+check("venue-type estimate: casual -> ~28", GP._venue_type_estimate("casual eatery Singapore") == 28)
+check("venue-type estimate: private/fine dining -> ~90 (expensive, NOT the budget)",
+      GP._venue_type_estimate("private dining celebration Singapore") == 90,
+      str(GP._venue_type_estimate("private dining celebration Singapore")))
+
+# priceRange (real Google $ band) is now READ and wins -> CONFIRMED.
+_AVODAH = {"id": "PLACE_AVODAH", "displayName": {"text": "Private Dining Singapore | Avodah"},
+           "formattedAddress": "5 Koek Rd, Singapore 228796",
+           "googleMapsUri": "https://maps.google.com/?cid=avodah", "businessStatus": "OPERATIONAL",
+           "types": ["restaurant", "food"], "primaryType": "restaurant",
+           # NO priceLevel enum, but a real $100 priceRange (the bug: shown at $15).
+           "priceRange": {"startPrice": {"currencyCode": "SGD", "units": "100"}},
+           "rating": 4.7, "userRatingCount": 25}
+_av = GP.normalize_verified_place(_AVODAH, query="halal affordable group seating celebration Singapore")
+check("Avodah priceRange $100 is READ -> price_per_head ~100 (never $15)",
+      _av is not None and _av.get("price_per_head") == 100, str(_av and _av.get("price_per_head")))
+check("Avodah priceRange -> price_confidence 'confirmed' (real Google data)",
+      _av is not None and _av.get("price_confidence") == "confirmed", str(_av and _av.get("price_confidence")))
+# The SAME upscale venue with NO Google price, surfaced by an occasion query, still
+# estimates expensive from venue type — NOT the $15 budget.
+_AV_NOPRICE = dict(_AVODAH); _AV_NOPRICE.pop("priceRange")
+_avn = GP.normalize_verified_place(_AV_NOPRICE, query="private dining celebration Singapore")
+check("price-less upscale venue estimates EXPENSIVE from venue type (~90), not budget",
+      _avn is not None and _avn.get("price_per_head") == 90, str(_avn and _avn.get("price_per_head")))
+
 check("agents cheap-tier query includes hawker/food court (budget-aware)",
       any(w in " ".join(GP.build_queries([
           {"constraints": {"budget_max": 15, "dietary": ["halal"], "available_days": ["FRI"]}}])).lower()
@@ -163,18 +192,57 @@ check("chosen venue is a REAL verified Places venue",
 check("price is labelled approximate (verified · price approximate)",
       _ver.get("price_confidence") == "approximate" and _plan.get("price_confidence") == "approximate",
       f"ver={_ver.get('price_confidence')} plan={_plan.get('price_confidence')}")
-check("per_person is the honest estimate <= budget, NOT the old $45",
+check("per_person is the honest venue estimate <= budget, NOT $45/budget-relabel",
       _plan.get("per_person") is not None and _plan.get("per_person") <= 15 and _plan.get("per_person") != 45,
       str(_plan.get("per_person")))
+check("per_person is NOT simply the group budget number (no budget-relabel)",
+      _plan.get("per_person") != 15 or _ver.get("price_confidence") == "approximate")
 check("budget nudge is data-derived from a CONFIRMED-price venue and >= budget",
       _s.get("suggested_min_budget") == 40, str(_s.get("suggested_min_budget")))
 
 # Confirmed-price path intact: a priced venue is 'confirmed', not approximate.
-_c = GP.normalize_verified_place(_REST, query="halal restaurant", budget_max=60)
+_c = GP.normalize_verified_place(_REST, query="halal restaurant")
 check("confirmed-price venue -> price_confidence 'confirmed'",
       _c is not None and _c.get("price_confidence") == "confirmed", str(_c and _c.get("price_confidence")))
 check("confirmed-price venue keeps the real band price (MODERATE -> 40)",
       _c is not None and _c.get("price_per_head") == 40, str(_c and _c.get("price_per_head")))
+
+# THE BUG, end to end: a $100 priceRange venue surfaced for a $15 birthday must be
+# FILTERED (never chosen, never shown at $15); an affordable venue wins + nudge fires.
+_HAWKER2 = {"id": "PLACE_HAWK2", "displayName": {"text": "Lazy Lizard Hawker"},
+            "formattedAddress": "7 Maxwell Rd, Singapore 069111",
+            "googleMapsUri": "https://maps.google.com/?cid=hawk2", "businessStatus": "OPERATIONAL",
+            "types": ["food_court", "food"], "primaryType": "food_court",
+            "rating": 4.3, "userRatingCount": 3000}  # price-less -> cheap venue-type est
+
+
+def _fake_places_birthday(query, api_key, limit):
+    ql = query.lower()
+    if any(w in ql for w in ("celebration", "birthday", "group seating", "group dining", "private")):
+        return {"places": [_AVODAH]}          # occasion query -> the $100 upscale place
+    if any(w in ql for w in ("hawker", "food court", "casual", "eatery")):
+        return {"places": [_HAWKER2]}         # cheap tier -> affordable hawker
+    return {"places": [_AVODAH]}              # generic restaurant query -> also upscale
+
+
+GP._places_search_text = _fake_places_birthday
+_s2 = S.new_live_session()
+_sid2 = _s2["session_id"]
+for _m in _s2["members"]:
+    S.add_constraints(_sid2, {"id": _m["id"], "name": _m.get("name", _m["id"]),
+        "constraints": {"available_days": ["FRI"], "budget_max": 15, "dietary": ["halal"]},
+        "freeform": "it's a birthday!"})
+S.compute_plan(_sid2)
+_s2 = S.get(_sid2)
+_p2 = _s2.get("plan") or {}
+_v2 = _p2.get("venue") or {}
+check("birthday $15: the $100 Avodah is NOT the chosen venue",
+      _v2.get("name") != "Private Dining Singapore | Avodah", str(_v2.get("name")))
+check("birthday $15: per_person is never shown at/above the real upscale price",
+      _p2.get("per_person") is None or _p2.get("per_person") <= 15, str(_p2.get("per_person")))
+check("birthday $15: nudge reflects the real confirmed upscale price (~100), not $15",
+      _s2.get("suggested_min_budget") in (100,) or _s2.get("phase") == "plan_ready",
+      f"nudge={_s2.get('suggested_min_budget')} phase={_s2.get('phase')}")
 
 # ORK-001 frozen: unchanged by the agents/** edits.
 S.seed_demo()
