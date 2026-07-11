@@ -45,6 +45,7 @@ function friendlyReason(
 export function LiveFailureCard({
   failReason,
   venueStatus,
+  suggestedMinBudget,
   onEditConstraints,
   onRetry,
   onRelax,
@@ -53,6 +54,7 @@ export function LiveFailureCard({
 }: {
   failReason?: string | null;
   venueStatus?: string | null;
+  suggestedMinBudget?: number | null;
   onEditConstraints?: () => void;
   onRetry?: () => void;
   onRelax?: () => void;
@@ -61,6 +63,7 @@ export function LiveFailureCard({
 }) {
   const { subtitle, hint } = friendlyReason(failReason, venueStatus);
   const hasActions = onEditConstraints || onRetry || onRelax || onBackToWaiting;
+  const showNudge = typeof suggestedMinBudget === "number" && suggestedMinBudget > 0;
   return (
     <div className={`${s.noVenueCard} ${s.failCard}`} role="alert">
       <div className={s.noVenueIcon} aria-hidden>
@@ -69,6 +72,12 @@ export function LiveFailureCard({
       <h2 className={s.noVenueTitle}>We couldn&apos;t complete this plan.</h2>
       <p className={s.noVenueSub}>{subtitle}</p>
       <p className={s.failHint}>{hint}</p>
+      {showNudge ? (
+        <p className={s.failHint}>
+          Confirmed-price restaurants for this group start around ~${suggestedMinBudget}/head — try
+          raising the minimum budget.
+        </p>
+      ) : null}
 
       {hasActions ? (
         <div className={s.failActions}>

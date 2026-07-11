@@ -92,6 +92,18 @@ S.seed_demo()
 ork = (S.get("ORK-001") or {}).get("plan", {}).get("per_person")
 check("ORK-001 per_person stays 80 (frozen)", ork == 80, f"per_person={ork}")
 
+# 5. Source regression: the fabricated flat $45 default is gone from the verified
+#    Places path and is NOT replaced by another fixed fake number — the estimate is
+#    tier-derived and capped at budget, so a price-less venue is honest + in-budget.
+import agents.google_places as GP  # noqa: E402
+check("agents.google_places._DEFAULT_PER_HEAD removed", not hasattr(GP, "_DEFAULT_PER_HEAD"))
+check("price-less estimate is tier-derived (15->15, 35->30, 80->45), never a flat 45",
+      GP._approx_per_head_for_budget(15) == 15 and GP._approx_per_head_for_budget(35) == 30
+      and GP._approx_per_head_for_budget(80) == 45,
+      f"{GP._approx_per_head_for_budget(15)}/{GP._approx_per_head_for_budget(35)}/{GP._approx_per_head_for_budget(80)}")
+check("price-less estimate never exceeds the group budget",
+      all(GP._approx_per_head_for_budget(b) <= b for b in (12, 15, 18, 20, 30, 40)))
+
 print("\n" + "=" * 60)
 if _failures:
     print(f"  RESULT: {len(_failures)} FAILURE(S)")

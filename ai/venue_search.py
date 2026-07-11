@@ -88,33 +88,40 @@ def _filter_in_budget(venues, budget_max):
     return out
 
 
+def budget_venue_terms(budget_max, cuisine=None):
+    """Budget band -> venue-TYPE vocabulary (no location/dietary/occasion).
+
+    THE single source of truth for the budget->vocabulary mapping, shared by every
+    query builder in the codebase (this module AND agents/google_places.py) so
+    there is never a second divergent builder. A low per-head budget in Singapore
+    ($10-20) is hawker-centre / food-court / casual-eatery territory, NOT sit-down
+    "restaurants"; asking Places for "<cuisine> restaurant" at that budget surfaces
+    few affordable results and the room dead-ends.
+
+    Bands (per-head SGD):
+      <= 20 -> hawker centre / food court / casual <cuisine> eatery  (affordable)
+      <= 40 -> casual <cuisine> restaurant                           (affordable)
+      else / no budget -> <cuisine> restaurant                       (sit-down)
+    """
+    cz = str(cuisine).strip() if cuisine else ""
+    czp = (cz + " ") if cz else ""
+    if isinstance(budget_max, (int, float)) and not isinstance(budget_max, bool):
+        if budget_max <= 20:
+            return ["hawker centre", "food court", f"casual {czp}eatery".strip()]
+        if budget_max <= 40:
+            return [f"casual {czp}restaurant".strip()]
+    return [f"{czp}restaurant".strip()]
+
+
 def build_text_queries(location, cuisine, budget_max=None):
     """The textQuery strings to send to Places, BUDGET-AWARE.
 
-    A low per-head budget in Singapore ($10-20) is hawker-centre / food-court /
-    kopitiam / casual-eatery territory, NOT sit-down "restaurants" — asking Places
-    for "<cuisine> restaurant" at that budget surfaces few verifiable results and
-    strict mode then dead-ends. So the low band issues a SMALL SET of affordable
-    queries (merged/deduped by the caller) instead of one "restaurant" query. Mid
-    and high bands keep the original phrasing. Total queries capped at <=3.
-
-    Bands (per-head SGD, mirrors _price_levels_for_budget):
-      <= 20 -> hawker centre / food court / casual <cuisine> eatery  (affordable)
-      <= 40 -> casual <cuisine> restaurant                           (affordable)
-      else / no budget -> <cuisine> restaurant                       (unchanged)
+    Low band issues a SMALL SET of affordable queries (merged/deduped by the
+    caller) instead of one "restaurant" query; mid/high keep sit-down phrasing.
+    Delegates the vocabulary to the shared budget_venue_terms() helper.
     """
     loc = location or "Singapore"
-    cz = cuisine or "restaurant"
-    if isinstance(budget_max, (int, float)) and not isinstance(budget_max, bool):
-        if budget_max <= 20:
-            return [
-                f"hawker centre in {loc}",
-                f"food court in {loc}",
-                f"casual {cz} eatery in {loc}",
-            ]
-        if budget_max <= 40:
-            return [f"casual {cz} restaurant in {loc}"]
-    return [f"{cz} restaurant in {loc}"]
+    return [f"{term} in {loc}" for term in budget_venue_terms(budget_max, cuisine)]
 
 
 def build_text_query(location, cuisine, budget_max=None):

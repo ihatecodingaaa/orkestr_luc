@@ -28,6 +28,9 @@ export type VenueVerification = {
   verification_notes?: string;
   confidence_score?: number;
   badge?: string;
+  // "confirmed" = Google returned a priceLevel; "approximate" = verified venue whose
+  // price is an honest estimate (UI shows "price approximate"). Never a faked number.
+  price_confidence?: "confirmed" | "approximate" | null;
   area?: string | null;
   cuisine?: string | null;
   price_hint?: string | null;
@@ -64,6 +67,11 @@ export type Plan = {
   venue?: Venue;
   total_cost?: number;
   per_person?: number;
+  price_confidence?: "confirmed" | "approximate" | null;
+  // Grounded "why this place won" reasons + detected occasion labels (Stage C).
+  // Reasons describe the REAL chosen venue; never invented venue facts.
+  why_reasons?: string[];
+  occasion?: string[];
   booking_ref?: string | null;
   satisfies?: string[];
   conflicts?: Conflict[];
@@ -132,6 +140,10 @@ export type StatusResponse = QuorumInfo & {
   booking_failed?: boolean;
   fail_reason?: string | null;
   venue_status?: string | null;
+  // Data-derived budget nudge (real Places data only). Present when confirmed-price
+  // venues exist above the group's minimum budget.
+  suggested_min_budget?: number | null;
+  suggested_reason?: string | null;
 };
 
 // Read-only public snapshot used for cross-device sync (presenter ↔ phones).
@@ -159,6 +171,9 @@ export type PublicPlan = {
   time?: string | null;
   per_person?: number | null;
   total_cost?: number | null;
+  price_confidence?: "confirmed" | "approximate" | null;
+  why_reasons?: string[];
+  occasion?: string[];
   booking_ref?: string | null;
   satisfies?: string[];
   venue?: {
@@ -187,6 +202,9 @@ export type PublicSession = QuorumInfo & {
   fail_reason?: string | null;
   venue_status?: string | null;
   venue_verification?: (VenueVerification & { name?: string; address?: string }) | null;
+  // Data-derived budget nudge (real Places data only; shown on approximate/fail).
+  suggested_min_budget?: number | null;
+  suggested_reason?: string | null;
   plan?: PublicPlan | null;
   // Raw fresh x402 receipt auto-fired by the backend at booking time. Present only
   // when a real on-chain receipt exists; run through toReceipt() to render it.

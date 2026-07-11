@@ -38,6 +38,7 @@ CANDIDATE_FIELDS = (
     "area",
     "cuisine",
     "price_hint",
+    "price_confidence",   # confirmed | approximate | None (Google priceLevel truth)
     "tags",
     "source_kind",        # google_places | exa | demo | unverified
     "source_url",
@@ -138,6 +139,7 @@ def blank_candidate(**overrides) -> dict:
         "area": None,
         "cuisine": None,
         "price_hint": None,
+        "price_confidence": None,
         "tags": [],
         "source_kind": "unverified",
         "source_url": None,
@@ -317,6 +319,7 @@ def _public_grounding(cand: dict) -> dict:
         "area": cand.get("area"),
         "cuisine": cand.get("cuisine"),
         "price_hint": cand.get("price_hint"),
+        "price_confidence": cand.get("price_confidence"),
         "source_url": cand.get("source_url"),
         "source_title": cand.get("source_title"),
         "source_domain": cand.get("source_domain"),
