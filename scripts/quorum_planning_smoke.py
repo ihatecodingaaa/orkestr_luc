@@ -20,6 +20,8 @@ import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import paidpath_guard  # noqa: F401  (force all real-x402 spend paths off in-process)
+
 import agents.discovery
 import agents.google_places
 

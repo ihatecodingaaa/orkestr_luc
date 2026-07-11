@@ -303,31 +303,80 @@ def _receipt_context(s):
         f'style="width:100%;height:180px;object-fit:cover;border-radius:8px;margin-bottom:16px;">'
         if photo_url else "")
 
+    # Product-truth (same rule as the live app card): only a FRESH, real on-chain
+    # settlement is the CURRENT payment proof. A saved fallback is shown ONLY as a
+    # clearly-labelled PREVIOUS proof (never as this session's payment); a mock is
+    # never rendered as a real receipt. latest_receipt() itself never returns a
+    # mock, but we branch defensively so every receipt surface obeys one rule.
+    rsource = receipt.get("source") if isinstance(receipt, dict) else None
+    rmode = receipt.get("payment_mode") if isinstance(receipt, dict) else None
     tx = receipt.get("txHash") if isinstance(receipt, dict) else None
     explorer = receipt.get("blockExplorerUrl") if isinstance(receipt, dict) else None
+    amount_disp = esc(receipt.get("amount_display") or "0.001 USDC") if isinstance(receipt, dict) else "0.001 USDC"
+    settled_at = (receipt.get("settled_at") or receipt.get("created_at")) if isinstance(receipt, dict) else None
+    is_mock = rsource == "mock_fallback" or rmode == "mock"
+    is_fresh = rsource == XDR.FRESH_SOURCE and bool(tx)
+
     frontend = os.environ.get("FRONTEND_URL", "").strip()
     settle_href = esc((frontend.rstrip("/") + "/settle") if frontend else "/settle")
     _btn = ("display:block;box-sizing:border-box;min-height:44px;margin-top:10px;"
             "padding:14px 16px;text-align:center;text-decoration:none;font-weight:600;"
             "border-radius:12px;color:#fff;")
-    if tx:
-        tx_s = str(tx)
-        tx_disp = f"{tx_s[:10]}…{tx_s[-6:]}" if len(tx_s) > 16 else tx_s
-        explorer_esc = esc(explorer or ("https://sepolia.basescan.org/tx/" + tx_s))
+
+    def _tx_box(tx_value):
+        tx_s = str(tx_value)
+        disp = f"{tx_s[:10]}…{tx_s[-6:]}" if len(tx_s) > 16 else tx_s
+        return (f'<div style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;'
+                f'font-size:15px;color:#111;word-break:break-all;padding:12px 14px;'
+                f'background:#f6f7f9;border-radius:10px;">{esc(disp)}</div>')
+
+    if is_mock:
+        # A mock/fallback body is NOT a real settlement — no tx hash, no Basescan.
         proof_html = (
-            f'<div style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;'
-            f'font-size:15px;color:#111;word-break:break-all;padding:12px 14px;'
-            f'background:#f6f7f9;border-radius:10px;">{esc(tx_disp)}</div>'
+            '<div style="padding:14px 16px;background:#fff7ed;color:#9a3412;'
+            'border-radius:10px;font-size:15px;">x402 did not settle a real payment. '
+            'No payment was sent.</div>'
+        )
+    elif is_fresh:
+        tx_s = str(tx)
+        explorer_esc = esc(explorer or ("https://sepolia.basescan.org/tx/" + tx_s))
+        settled_line = (f'<div style="color:#1a7f37;font-size:13px;margin-top:6px;">'
+                        f'Settled {esc(settled_at)}</div>' if settled_at else '')
+        proof_html = (
+            f'<div style="display:inline-block;background:#e6f4ea;color:#1a7f37;'
+            f'font-size:12px;font-weight:700;padding:6px 12px;border-radius:999px;'
+            f'margin-bottom:10px;">Fresh x402 testnet receipt · {amount_disp}</div>'
+            f'{_tx_box(tx)}'
+            f'{settled_line}'
             f'<a href="{explorer_esc}" target="_blank" rel="noopener" '
             f'style="{_btn}background:#0052FF;margin-top:12px;">View on Basescan ↗</a>'
             f'<a href="{settle_href}" target="_blank" rel="noopener" '
             f'style="{_btn}background:#888;">View live settlement →</a>'
         )
     else:
+        # Saved fallback (or nothing) -> NEVER shown as this session's payment. Say
+        # so plainly, and offer the prior verified tx only as a labelled PREVIOUS proof.
         proof_html = (
             '<div style="padding:14px 16px;background:#fff7ed;color:#9a3412;'
-            'border-radius:10px;font-size:15px;">payment pending — receipt not yet fired</div>'
+            'border-radius:10px;font-size:15px;">No current x402 payment receipt for '
+            'this session yet.</div>'
         )
+        if tx:
+            tx_s = str(tx)
+            explorer_esc = esc(explorer or ("https://sepolia.basescan.org/tx/" + tx_s))
+            proof_html += (
+                f'<div style="margin-top:14px;padding:14px 16px;border:1px dashed #ddd;'
+                f'border-radius:10px;background:#fafafa;">'
+                f'<div style="font-size:12px;text-transform:uppercase;letter-spacing:0.04em;'
+                f'color:#888;margin-bottom:8px;">Previous verified testnet proof</div>'
+                f'{_tx_box(tx)}'
+                f'<div style="color:#666;font-size:13px;margin-top:8px;">This proves the '
+                f'x402 payment rail has worked before, but it is not the current session '
+                f'payment.</div>'
+                f'<a href="{explorer_esc}" target="_blank" rel="noopener" '
+                f'style="{_btn}background:#888;margin-top:12px;">View previous proof on Basescan ↗</a>'
+                f'</div>'
+            )
 
     return {
         "session_name": session_name, "date_block": date_block,

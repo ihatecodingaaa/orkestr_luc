@@ -7,6 +7,15 @@ import { shortHash } from "@/lib/orkestr-api";
 import type { X402Receipt } from "@/lib/orkestr-api";
 import s from "./live.module.css";
 
+// Render a receipt's ISO timestamp as a human, local time. Safe on bad/empty
+// input (returns null) — only ever shown for a fresh receipt that carries one.
+function formatReceiptTime(iso?: string | null): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleString();
+}
+
 function WalletNode({
   label,
   addr,
@@ -84,8 +93,13 @@ export function PaymentProofCard({
   }
 
   const kicker = fresh ? "Fresh x402 testnet receipt" : "Saved verified receipt";
+  // Show the settlement timestamp on a fresh receipt (req: fresh proof carries a
+  // real time). Falls back to "just now" only if the backend omitted created_at.
+  const freshWhen = fresh && receipt.createdAt ? formatReceiptTime(receipt.createdAt) : null;
   const tag = fresh
-    ? "Fresh receipt created just now. Open Basescan for the exact on-chain timestamp."
+    ? freshWhen
+      ? `Fresh receipt settled ${freshWhen}. Open Basescan to verify on-chain.`
+      : "Fresh receipt created just now. Open Basescan for the exact on-chain timestamp."
     : "Previously settled on Base Sepolia. This screen does not create a new payment.";
 
   return (
@@ -157,6 +171,7 @@ export function PaymentProofCard({
               <Fact label="Network" value={receipt.networkId} />
               <Fact label="Chain" value={receipt.network} />
               <Fact label="Receipt" value={fresh ? "Fresh demo receipt" : "Saved verified receipt"} />
+              {freshWhen ? <Fact label="Settled at" value={freshWhen} /> : null}
             </div>
           </div>
         ) : null}

@@ -88,9 +88,42 @@ def _filter_in_budget(venues, budget_max):
     return out
 
 
-def build_text_query(location, cuisine):
-    """The exact textQuery string sent to Places: '<cuisine> restaurant in <loc>'."""
-    return f"{cuisine or 'restaurant'} restaurant in {location or 'Singapore'}"
+def build_text_queries(location, cuisine, budget_max=None):
+    """The textQuery strings to send to Places, BUDGET-AWARE.
+
+    A low per-head budget in Singapore ($10-20) is hawker-centre / food-court /
+    kopitiam / casual-eatery territory, NOT sit-down "restaurants" — asking Places
+    for "<cuisine> restaurant" at that budget surfaces few verifiable results and
+    strict mode then dead-ends. So the low band issues a SMALL SET of affordable
+    queries (merged/deduped by the caller) instead of one "restaurant" query. Mid
+    and high bands keep the original phrasing. Total queries capped at <=3.
+
+    Bands (per-head SGD, mirrors _price_levels_for_budget):
+      <= 20 -> hawker centre / food court / casual <cuisine> eatery  (affordable)
+      <= 40 -> casual <cuisine> restaurant                           (affordable)
+      else / no budget -> <cuisine> restaurant                       (unchanged)
+    """
+    loc = location or "Singapore"
+    cz = cuisine or "restaurant"
+    if isinstance(budget_max, (int, float)) and not isinstance(budget_max, bool):
+        if budget_max <= 20:
+            return [
+                f"hawker centre in {loc}",
+                f"food court in {loc}",
+                f"casual {cz} eatery in {loc}",
+            ]
+        if budget_max <= 40:
+            return [f"casual {cz} restaurant in {loc}"]
+    return [f"{cz} restaurant in {loc}"]
+
+
+def build_text_query(location, cuisine, budget_max=None):
+    """The PRIMARY textQuery string sent to Places (budget-aware; first of the band).
+
+    Kept for callers/tests that want a single string. With no budget it is the
+    unchanged '<cuisine> restaurant in <loc>'.
+    """
+    return build_text_queries(location, cuisine, budget_max)[0]
 
 
 def _load_seed_venues():
@@ -154,26 +187,8 @@ def _map_place(place):
     }
 
 
-def search_venues(location, cuisine_prefs, budget_max, dietary, group_size, api_key):
-    """Return (venues, photo_name): a list of frozen-5-key venue dicts plus the
-    top venue's Places photo resource name (or None).
-
-    Real Google Places (New) Text Search when api_key is present; otherwise, or on
-    ANY error/empty result, falls back to data/venues.json with photo_name=None.
-    Results are sorted by Google rating DESCending; rating and photo name are
-    internal only and are stripped so each returned dict contains exactly the
-    frozen 5 keys {name, address, lat, lng, tags}.
-
-    budget_max/dietary/group_size are accepted for query context and future
-    filtering; they never alter the returned shape.
-    """
-    if not api_key:
-        return _fallback_venues(), None
-
-    text_query = build_text_query(location, cuisine_prefs)
-    # Budget-aware: constrain the API to price levels the group can afford. None
-    # (no usable budget, or > 70 SGD/head) leaves the search unfiltered.
-    levels = _price_levels_for_budget(budget_max)
+def _places_search(text_query, levels, api_key):
+    """POST one Text Search query -> list of raw place dicts (or [] on any error)."""
     body_dict = {"textQuery": text_query, "maxResultCount": 5}
     if levels:
         body_dict["priceLevels"] = levels
@@ -190,31 +205,73 @@ def search_venues(location, cuisine_prefs, budget_max, dietary, group_size, api_
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
             data = json.loads(resp.read())
     except Exception:
-        # URLError, HTTPError (bad key -> 400/403), timeout, JSON error -> fallback.
-        return _fallback_venues(), None
-
+        # URLError, HTTPError (bad key -> 400/403), timeout, JSON error -> [].
+        return []
     places = data.get("places") if isinstance(data, dict) else None
-    if not places:
-        LOGGER.info("venue_search: no results for budget levels %s query '%s', using fallback",
-                    levels, text_query)
-        return _fallback_venues(), None
+    return [p for p in places if isinstance(p, dict)] if places else []
 
-    mapped = [_map_place(p) for p in places if isinstance(p, dict)]
+
+def search_venues(location, cuisine_prefs, budget_max, dietary, group_size, api_key):
+    """Return (venues, photo_name, top_estimate): a list of frozen-5-key venue
+    dicts, the top venue's Places photo resource name (or None), and the top
+    venue's estimated per-head SGD (or None) for budget-truthful pricing.
+
+    Real Google Places (New) Text Search when api_key is present; otherwise, or on
+    ANY error/empty result, falls back to data/venues.json with photo_name=None and
+    top_estimate=None. Results are sorted by Google rating DESCending; rating, photo
+    name and price level are internal only and are stripped so each returned dict
+    contains exactly the frozen 5 keys {name, address, lat, lng, tags}.
+
+    Budget-aware: for a low per-head budget the query vocabulary is affordable
+    (hawker/food-court/casual) and a small set of queries is issued and merged so a
+    $10-20 budget reliably returns real, verifiable options instead of dead-ending.
+
+    dietary/group_size are accepted for query context and future filtering; they
+    never alter the returned shape.
+    """
+    if not api_key:
+        return _fallback_venues(), None, None
+
+    # Budget-aware: constrain the API to price levels the group can afford. None
+    # (no usable budget, or > 70 SGD/head) leaves the search unfiltered.
+    levels = _price_levels_for_budget(budget_max)
+    queries = build_text_queries(location, cuisine_prefs, budget_max)
+
+    # Issue each query and MERGE/DEDUPE by name+address so the low band (several
+    # affordable queries) still yields one clean pool. Dedupe preserves first-seen
+    # order; a place with no address dedupes on name alone.
+    merged, seen = [], set()
+    for q in queries:
+        for p in _places_search(q, levels, api_key):
+            name = (p.get("displayName") or {}).get("text")
+            key = (name, p.get("formattedAddress"))
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(p)
+
+    if not merged:
+        LOGGER.info("venue_search: no results for budget levels %s queries %s, using fallback",
+                    levels, queries)
+        return _fallback_venues(), None, None
+
+    mapped = [_map_place(p) for p in merged]
     if not mapped:
-        return _fallback_venues(), None
+        return _fallback_venues(), None, None
     # Sort by rating desc, then keep only venues within budget. Fall back to the
     # over-budget (real) results ONLY when none fit — better a real venue than a
-    # seed one. Capture the chosen top venue's photo, then strip the internal
-    # _rating/_photo_name/_price_level so only the frozen 5 keys remain.
+    # seed one. Capture the chosen top venue's photo + per-head estimate, then strip
+    # the internal _rating/_photo_name/_price_level so only the frozen 5 keys remain.
     mapped.sort(key=lambda v: v.get("_rating") or 0, reverse=True)
     in_budget = _filter_in_budget(mapped, budget_max)
     chosen = in_budget if in_budget else mapped
     if not in_budget:
-        LOGGER.info("venue_search: no in-budget venues (<= %s SGD/head) for '%s', "
-                    "using best-rated over-budget result", budget_max, text_query)
+        LOGGER.info("venue_search: no in-budget venues (<= %s SGD/head) for %s, "
+                    "using best-rated over-budget result", budget_max, queries)
     photo_name = chosen[0].get("_photo_name")
+    top_estimate = _estimate_per_head(chosen[0].get("_price_level"))
     for v in chosen:
         v.pop("_rating", None)
         v.pop("_photo_name", None)
         v.pop("_price_level", None)
-    return chosen, photo_name
+    return chosen, photo_name, top_estimate

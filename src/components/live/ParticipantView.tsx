@@ -9,6 +9,7 @@ import { ParticipantSplitCard } from "./ParticipantSplitCard";
 import { LiveFailureCard } from "./LiveFailureCard";
 import { NoVerifiedVenueCard } from "./verification";
 import {
+  BUDGET_CHIPS,
   COPY,
   DAY_OPTIONS,
   DEMO_PLAN,
@@ -231,10 +232,22 @@ export function ParticipantView({ roomId, memberId }: { roomId: string; memberId
                 type="number"
                 min={0}
                 inputMode="numeric"
-                placeholder="60"
+                placeholder="20"
                 value={form.budget}
                 onChange={(e) => setForm({ ...form, budget: e.target.value })}
               />
+            </div>
+            <div className={s.chipRow}>
+              {BUDGET_CHIPS.map((b) => (
+                <button
+                  key={b.value}
+                  type="button"
+                  className={`${s.chip} ${form.budget === b.value ? s.chipOn : ""}`}
+                  onClick={() => setForm({ ...form, budget: b.value })}
+                >
+                  {b.label}
+                </button>
+              ))}
             </div>
           </div>
 

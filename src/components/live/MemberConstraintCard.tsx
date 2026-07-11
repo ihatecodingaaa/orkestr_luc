@@ -2,7 +2,14 @@
 
 import type { ReactNode } from "react";
 import { Avatar, StatusPill } from "./primitives";
-import { DAY_OPTIONS, DIET_OPTIONS, isReadyToSubmit, personaById } from "@/lib/demo";
+import {
+  BUDGET_CHIPS,
+  DAY_OPTIONS,
+  DIET_OPTIONS,
+  constraintSummary,
+  isReadyToSubmit,
+  personaById,
+} from "@/lib/demo";
 import type { Constraints, Member } from "@/lib/orkestr-api";
 import s from "./live.module.css";
 
@@ -50,7 +57,14 @@ export function MemberConstraintCard({
         <Avatar id={member.id} size={42} ring={submitted} />
         <div className={s.memberWho}>
           <strong>{member.name}</strong>
-          <span>{persona?.wants ?? persona?.vibe ?? "Member"}</span>
+          {/* Once submitted, the sub-header reflects the member's OWN live diet /
+              budget / days (so it agrees with the badges below); before that it
+              falls back to the persona vibe, never a fake constraint line. */}
+          <span>
+            {submitted
+              ? constraintSummary(value) || (persona?.vibe ?? "Member")
+              : (persona?.vibe ?? "Hasn't replied yet")}
+          </span>
         </div>
         <StatusPill kind={submitted ? "ready" : "pending"}>
           {submitted ? "Ready" : "Pending"}
@@ -106,10 +120,22 @@ export function MemberConstraintCard({
                 type="number"
                 min={0}
                 inputMode="numeric"
-                placeholder="60"
+                placeholder="20"
                 value={value.budget}
                 onChange={(e) => onChange({ ...value, budget: e.target.value })}
               />
+            </div>
+            <div className={s.chipRow}>
+              {BUDGET_CHIPS.map((b) => (
+                <button
+                  key={b.value}
+                  type="button"
+                  className={`${s.chip} ${value.budget === b.value ? s.chipOn : ""}`}
+                  onClick={() => onChange({ ...value, budget: b.value })}
+                >
+                  {b.label}
+                </button>
+              ))}
             </div>
           </Field>
 

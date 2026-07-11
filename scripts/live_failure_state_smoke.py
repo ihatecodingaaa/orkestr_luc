@@ -17,6 +17,8 @@ import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import paidpath_guard  # noqa: F401  (force all real-x402 spend paths off in-process)
+
 # Strict grounding + offline discovery -> the planner fails closed (no real venue).
 os.environ["STRICT_REAL_VENUES"] = "true"
 
