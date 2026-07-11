@@ -82,18 +82,31 @@ export function FreshProofPanel({ onFresh }: { onFresh: (r: X402Receipt) => void
       const res = await runDemoReceipt(secret, confirm);
       if (!aliveRef.current) return;
       if (res.status === 200 && res.ok) {
+        // Only a GENUINE fresh on-chain settlement may be shown as current proof.
+        // A 200 mock fallback (backend timed out / errored) is rejected by
+        // toReceipt() -> null; never promote it and never claim a payment happened.
         const fresh = toReceipt(res.body);
-        if (fresh) onFresh(fresh);
-        setPhase("success");
-        setMessage("Fresh receipt created.");
-        setSecret(""); // do not keep the secret around after use
-        setConfirm("");
-        void refreshStatus(); // pick up the cooldown that just started
+        if (fresh && fresh.isFresh) {
+          onFresh(fresh);
+          setPhase("success");
+          setMessage("Fresh receipt created.");
+          setSecret(""); // do not keep the secret around after use
+          setConfirm("");
+          void refreshStatus(); // pick up the cooldown that just started
+        } else {
+          setPhase("error");
+          setMessage("x402 did not settle a real payment (backend was slow). No payment was sent.");
+          void refreshStatus();
+        }
       } else if (res.status === 429) {
         const left = Number(res.body?.cooldown_remaining_seconds) || 0;
         setCooldownLeft(left);
         setPhase("error");
-        setMessage(left > 0 ? `Cooldown active. Try again in ${left}s.` : "Cooldown active.");
+        setMessage(
+          left > 0
+            ? `Cooldown active. No new payment was sent. Try again in ${left}s.`
+            : "Cooldown active. No new payment was sent.",
+        );
       } else if (res.status === 409) {
         setPhase("error");
         setMessage("A run is already in progress. Please wait for it to finish.");
@@ -125,7 +138,8 @@ export function FreshProofPanel({ onFresh }: { onFresh: (r: X402Receipt) => void
     if (!statusLoaded) return "Checking backend…";
     if (!enabled) return "Fresh proof runs are disabled on the backend.";
     if (phase === "loading") return "Sending 0.001 USDC through x402…";
-    if (cooling) return `Cooldown active. Try again in ${cooldownLeft}s.`;
+    if (cooling)
+      return `Cooldown active. No new payment was sent. Try again in ${cooldownLeft}s.`;
     if (phase === "success") return message || "Fresh receipt created.";
     if (phase === "error") return message;
     return "Ready to create a fresh 0.001 USDC testnet receipt.";
@@ -163,55 +177,69 @@ export function FreshProofPanel({ onFresh }: { onFresh: (r: X402Receipt) => void
             only control that can spend testnet USDC.
           </p>
 
-          <div className={s.freshForm}>
-            <label className={s.freshField}>
-              <span className={s.freshLabel}>Presenter secret</span>
-              <input
-                className={s.freshInput}
-                type="password"
-                value={secret}
-                onChange={(e) => setSecret(e.target.value)}
-                placeholder="X402_DEMO_RECEIPT_SECRET"
-                autoComplete="off"
-                spellCheck={false}
-                disabled={!enabled || phase === "loading"}
-              />
-            </label>
-            <label className={s.freshField}>
-              <span className={s.freshLabel}>
-                Type <code className={s.freshCode}>{phrase}</code> to confirm
-              </span>
-              <input
-                className={s.freshInput}
-                type="text"
-                value={confirm}
-                onChange={(e) => setConfirm(e.target.value)}
-                placeholder={phrase}
-                autoComplete="off"
-                spellCheck={false}
-                disabled={!enabled || phase === "loading"}
-              />
-            </label>
-          </div>
+          {!statusLoaded ? (
+            <p className={`${s.freshStatus} ${s.freshDisabled}`} role="status" aria-live="polite">
+              Checking backend…
+            </p>
+          ) : !enabled ? (
+            // Backend fresh-receipt runs are OFF: never render the secret input or the
+            // run button. Live mode still honestly shows "Fresh x402 payment not run yet."
+            <p className={`${s.freshStatus} ${s.freshDisabled}`} role="status" aria-live="polite">
+              Fresh proof runs are disabled on the backend — no run control is shown.
+            </p>
+          ) : (
+            <>
+              <div className={s.freshForm}>
+                <label className={s.freshField}>
+                  <span className={s.freshLabel}>Presenter secret</span>
+                  <input
+                    className={s.freshInput}
+                    type="password"
+                    value={secret}
+                    onChange={(e) => setSecret(e.target.value)}
+                    placeholder="X402_DEMO_RECEIPT_SECRET"
+                    autoComplete="off"
+                    spellCheck={false}
+                    disabled={phase === "loading"}
+                  />
+                </label>
+                <label className={s.freshField}>
+                  <span className={s.freshLabel}>
+                    Type <code className={s.freshCode}>{phrase}</code> to confirm
+                  </span>
+                  <input
+                    className={s.freshInput}
+                    type="text"
+                    value={confirm}
+                    onChange={(e) => setConfirm(e.target.value)}
+                    placeholder={phrase}
+                    autoComplete="off"
+                    spellCheck={false}
+                    disabled={phase === "loading"}
+                  />
+                </label>
+              </div>
 
-          <div className={s.freshActions}>
-            <button
-              type="button"
-              className={s.freshBtn}
-              onClick={() => void run()}
-              disabled={!canRun}
-            >
-              {phase === "loading" ? "Sending…" : "Run fresh x402 proof"}
-            </button>
-            <span className={`${s.freshStatus} ${tone}`} role="status" aria-live="polite">
-              {statusLine}
-            </span>
-          </div>
+              <div className={s.freshActions}>
+                <button
+                  type="button"
+                  className={s.freshBtn}
+                  onClick={() => void run()}
+                  disabled={!canRun}
+                >
+                  {phase === "loading" ? "Sending…" : "Run fresh x402 proof"}
+                </button>
+                <span className={`${s.freshStatus} ${tone}`} role="status" aria-live="polite">
+                  {statusLine}
+                </span>
+              </div>
 
-          <p className={s.freshFoot}>
-            The secret is sent only to the run endpoint — never stored, never logged. A cooldown and
-            an in-flight lock prevent accidental double runs.
-          </p>
+              <p className={s.freshFoot}>
+                The secret is sent only to the run endpoint — never stored, never logged. A cooldown
+                and an in-flight lock prevent accidental double runs.
+              </p>
+            </>
+          )}
         </div>
       ) : null}
     </div>

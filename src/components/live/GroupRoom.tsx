@@ -7,6 +7,7 @@ import { WaitingRoom } from "./WaitingRoom";
 import { AgentTimeline } from "./AgentTimeline";
 import { FinalPlanCard } from "./FinalPlanCard";
 import { PaymentProofCard } from "./PaymentProofCard";
+import { FreshProofPanel } from "./FreshProofPanel";
 import { SmartSplitCard } from "./SmartSplitCard";
 import { TrustPanel } from "./TrustPanel";
 import { MerchantAdapterCard } from "./MerchantAdapterCard";
@@ -1204,6 +1205,19 @@ export function GroupRoom({
       {isLive && PRESENTER_TOOLS_VISIBLE ? <HowToDemo /> : null}
 
       {isLive && PRESENTER_TOOLS_VISIBLE ? <WalletLab receipt={activeReceipt} /> : null}
+
+      {/* Presenter-only, tools-gated. The ONE deliberate control that can create a
+          real fresh x402 tx. Hidden from participants (this block never renders in
+          the participant view) and self-hides its run control when the backend
+          fresh-receipt path is disabled. onFresh only accepts a genuine fresh
+          receipt, so a mock/fallback can never become the current proof. */}
+      {isLive && PRESENTER_TOOLS_VISIBLE ? (
+        <FreshProofPanel
+          onFresh={(r) => {
+            if (r.isFresh) setReceipt(r);
+          }}
+        />
+      ) : null}
 
       {isLive && PRESENTER_TOOLS_VISIBLE ? (
         <LiveReadinessPanel

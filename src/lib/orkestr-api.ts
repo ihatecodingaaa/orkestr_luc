@@ -255,8 +255,16 @@ export type DemoReceiptStatus = {
 
 // Map a backend receipt JSON (from /latest or a successful /run) to X402Receipt.
 // Defensive: unknown/partial payloads fall back to safe display defaults.
+//
+// Product-truth guard: a MOCK/fallback body (returned by the /run route when the
+// facilitator times out or errors) is NOT a real on-chain settlement and must
+// NEVER become a renderable receipt — its placeholder txHash has no verifiable
+// Basescan tx behind it. Reject it here so every caller treats it as "no proof".
 export function toReceipt(raw: unknown): X402Receipt | null {
   if (!isRecord(raw)) return null;
+  if (asString(raw.source) === "mock_fallback" || asString(raw.payment_mode) === "mock") {
+    return null;
+  }
   const txHash = asString(raw.txHash);
   const source: ReceiptSource =
     asString(raw.source) === "fresh_demo_receipt" ? "fresh_demo_receipt" : "saved_verified_receipt";

@@ -418,6 +418,65 @@ check("overall: demo-receipt seam total across run == expected (never surprise-c
 check("overall: real signer tripwire never tripped anywhere", _TRIP["count"] == 0, f"trip={_TRIP['count']}")
 
 # ---------------------------------------------------------------------------
+section("13. MOCK FALLBACK honest + never a real receipt; cooldown keeps last")
+# ---------------------------------------------------------------------------
+# Product-truth: the /run route's timeout/error fallback must answer 200 (never an
+# ugly 5xx) but must be UNMISTAKABLY not-real — payment_mode=mock, source=
+# mock_fallback, NO real tx hash, NO Basescan link — so the frontend toReceipt()
+# rejects it and it can never appear as current payment proof. The real signer is
+# never reached on this path.
+os.environ["ENABLE_X402_DEMO_RECEIPT"] = "true"
+os.environ["X402_DEMO_RECEIPT_SECRET"] = TEST_SECRET
+os.environ["X402_DEMO_RECEIPT_AMOUNT"] = "1000"
+os.environ["X402_DEMO_RECEIPT_COOLDOWN_SECONDS"] = "60"
+reset()
+
+_orig_run = XDR.run_demo_receipt
+
+
+def _raise_run(*_a, **_k):
+    raise RuntimeError("forced timeout/error for mock-fallback test")
+
+
+XDR.run_demo_receipt = _raise_run
+try:
+    r = client.post("/api/x402/demo-receipt/run", json={"confirm": CONFIRM}, headers=HDR)
+finally:
+    XDR.run_demo_receipt = _orig_run
+mb = r.json()
+check("mock fallback -> 200 (never an ugly 5xx)", r.status_code == 200, f"got {r.status_code}")
+check("mock fallback payment_mode=mock", mb.get("payment_mode") == "mock", str(mb.get("payment_mode")))
+check("mock fallback source=mock_fallback", mb.get("source") == "mock_fallback", str(mb.get("source")))
+check("mock fallback has NO real tx hash", mb.get("real_tx_hash") is None, str(mb.get("real_tx_hash")))
+check("mock fallback has NO basescan link",
+      mb.get("blockExplorerUrl") is None and mb.get("explorer_url") is None,
+      f"{mb.get('blockExplorerUrl')}/{mb.get('explorer_url')}")
+check("mock fallback: real signer NOT reached", _TRIP["count"] == 0, f"trip={_TRIP['count']}")
+_mc, _mbad = no_forbidden(mb)
+check("mock fallback leaks nothing", _mc, f"offending={_mbad}")
+
+# Cooldown must NOT erase the last real receipt. Run one fresh success, then a
+# second attempt within cooldown (429) must leave /latest still pointing at the
+# fresh tx — the last verified receipt survives.
+os.environ["X402_DEMO_RECEIPT_COOLDOWN_SECONDS"] = "60"
+reset()
+r = client.post("/api/x402/demo-receipt/run", json={"confirm": CONFIRM}, headers=HDR)
+check("fresh run before cooldown -> 200", r.status_code == 200, f"got {r.status_code}")
+lb = client.get("/api/x402/demo-receipt/latest").json()
+check("latest is fresh after run",
+      lb.get("source") == "fresh_demo_receipt" and lb.get("txHash") == FAKE_TX, str(lb.get("source")))
+r2 = client.post("/api/x402/demo-receipt/run", json={"confirm": CONFIRM}, headers=HDR)
+check("second run within cooldown -> 429", r2.status_code == 429, f"got {r2.status_code}")
+lb2 = client.get("/api/x402/demo-receipt/latest").json()
+check("cooldown did NOT erase last receipt (still fresh FAKE_TX)",
+      lb2.get("source") == "fresh_demo_receipt" and lb2.get("txHash") == FAKE_TX, str(lb2))
+check("cooldown path: real signer still not reached", _TRIP["count"] == 0, f"trip={_TRIP['count']}")
+
+# leave demo receipt disabled again for a clean exit
+os.environ["ENABLE_X402_DEMO_RECEIPT"] = "false"
+reset()
+
+# ---------------------------------------------------------------------------
 print(f"\n{'='*70}")
 if _failures:
     print(f"  RESULT: {len(_failures)} FAILURE(S), {_passes} pass")
