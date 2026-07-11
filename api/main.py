@@ -739,11 +739,17 @@ def status(sid: str):
                     **q}
         S.compute_plan(sid)  # lazily produce the plan -> plan_ready
         q = S.quorum_report(s)  # refresh plan_basis now that a plan exists
+    # Additive, data-derived budget nudge (real Places data only; never invented).
+    nudge = {}
+    if s.get("suggested_min_budget") is not None:
+        nudge["suggested_min_budget"] = s.get("suggested_min_budget")
+    if s.get("suggested_reason"):
+        nudge["suggested_reason"] = s.get("suggested_reason")
     if s["phase"] == "failed":
         return {"phase": "failed", "booking_failed": True,
                 "fail_reason": s.get("fail_reason"),
-                "venue_status": s.get("venue_status"), **q}
-    return {"phase": s["phase"], "venue_status": s.get("venue_status"), **q}
+                "venue_status": s.get("venue_status"), **nudge, **q}
+    return {"phase": s["phase"], "venue_status": s.get("venue_status"), **nudge, **q}
 
 
 @app.post("/api/session/{sid}/draft")
@@ -816,6 +822,9 @@ def session_public(sid: str):
                 "verification_status": ver.get("verification_status"),
                 "source_kind": ver.get("source_kind"),
                 "badge": ver.get("badge"),
+                # Price truth: "confirmed" (Google priceLevel) vs "approximate"
+                # (verified venue, price estimated) so the UI can label it honestly.
+                "price_confidence": ver.get("price_confidence"),
                 "source_domain": ver.get("source_domain"),
                 "source_url": ver.get("source_url"),
                 "google_maps_uri": ver.get("google_maps_uri"),
@@ -835,6 +844,9 @@ def session_public(sid: str):
             "time": plan.get("time"),
             "per_person": plan.get("per_person"),
             "total_cost": plan.get("total_cost"),
+            "price_confidence": plan.get("price_confidence"),
+            "why_reasons": plan.get("why_reasons") or [],
+            "occasion": plan.get("occasion") or [],
             "booking_ref": plan.get("booking_ref"),
             "satisfies": plan.get("satisfies") or [],
             "venue": {
@@ -865,6 +877,9 @@ def session_public(sid: str):
         "fail_reason": s.get("fail_reason"),
         "venue_status": s.get("venue_status"),
         "venue_verification": venue_verification,
+        # Additive, data-derived budget nudge (real Places data only; never invented).
+        "suggested_min_budget": s.get("suggested_min_budget"),
+        "suggested_reason": s.get("suggested_reason"),
         "plan": plan_summary,
         # Additive quorum state (P2.2) so the waiting room can show honest progress
         # ("3 of 5 replied") and label a quorum-based plan as a draft. No secrets.

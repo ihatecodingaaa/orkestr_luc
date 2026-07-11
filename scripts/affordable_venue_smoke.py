@@ -21,6 +21,8 @@ import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import paidpath_guard  # noqa: F401  (force all real-x402 spend paths off in-process)
+
 from ai import venue_search as V
 
 _failures = []
@@ -91,6 +93,94 @@ if api_key:
           est is None or isinstance(est, (int, float)), str(est))
 else:
     print("  [SKIP] live Places check — GOOGLE_PLACES_API_KEY not set")
+
+# 7. Stage B — FIX AT SOURCE, end to end (agents pipeline), Places HTTP mocked.
+#    The $15-25 FRI group must resolve to a REAL verified venue with an honest
+#    approximate price (never $45, never the failure screen), and the budget nudge
+#    must be data-derived from a confirmed-price venue.
+print("\n--- Stage B: verified-approximate resolution + data-derived nudge ---")
+os.environ["USE_GOOGLE_PLACES"] = "true"
+os.environ["GOOGLE_PLACES_API_KEY"] = "dummy-mock-key-not-used-for-network"
+os.environ["STRICT_REAL_VENUES"] = "true"
+os.environ["ALLOW_SAMPLE_VENUE_FALLBACK"] = "false"
+os.environ["USE_EXA"] = "false"
+
+import agents.google_places as GP  # noqa: E402
+from core import session as S  # noqa: E402
+
+# Regression: the fabricated flat price is gone and not replaced by another fixed
+# fake number; the estimator is tier-derived and capped at budget.
+check("_DEFAULT_PER_HEAD removed from agents.google_places", not hasattr(GP, "_DEFAULT_PER_HEAD"))
+check("approx estimate is tier-derived, not a flat 45 (budget 15 -> 15)",
+      GP._approx_per_head_for_budget(15) == 15, str(GP._approx_per_head_for_budget(15)))
+check("approx estimate never exceeds budget (budget 15 -> <=15)",
+      GP._approx_per_head_for_budget(15) <= 15)
+check("agents cheap-tier query includes hawker/food court (budget-aware)",
+      any(w in " ".join(GP.build_queries([
+          {"constraints": {"budget_max": 15, "dietary": ["halal"], "available_days": ["FRI"]}}])).lower()
+          for w in ("hawker", "food court")))
+
+_HAWKER = {"id": "PLACE_HAWKER_1", "displayName": {"text": "Maxwell Food Centre"},
+           "formattedAddress": "1 Kadayanallur St, Singapore 069184",
+           "googleMapsUri": "https://maps.google.com/?cid=hawker1", "businessStatus": "OPERATIONAL",
+           "types": ["food_court", "food"], "primaryType": "food_court",
+           "rating": 4.4, "userRatingCount": 12000}  # NO priceLevel -> approximate
+_REST = {"id": "PLACE_REST_1", "displayName": {"text": "Some Halal Restaurant"},
+         "formattedAddress": "10 Orchard Rd, Singapore 238888",
+         "googleMapsUri": "https://maps.google.com/?cid=rest1", "businessStatus": "OPERATIONAL",
+         "types": ["restaurant", "food"], "primaryType": "restaurant",
+         "priceLevel": "PRICE_LEVEL_MODERATE", "rating": 4.2, "userRatingCount": 800}  # confirmed ~$40
+
+
+def _fake_places(query, api_key, limit):
+    ql = query.lower()
+    if any(w in ql for w in ("hawker", "food court", "casual", "eatery")):
+        return {"places": [_HAWKER]}
+    return {"places": [_REST]}
+
+
+GP._places_search_text = _fake_places
+
+_s = S.new_live_session()
+_sid = _s["session_id"]
+_diet = [["halal"], ["vegetarian"], ["vegan"], ["no_raw_fish"], []]
+_bud = [15, 25, 15, 25, 15]
+for _i, _m in enumerate(_s["members"]):
+    S.add_constraints(_sid, {"id": _m["id"], "name": _m.get("name", _m["id"]),
+        "constraints": {"available_days": ["FRI"], "budget_max": _bud[_i], "dietary": _diet[_i]},
+        "freeform": ""})
+S.compute_plan(_sid)
+_s = S.get(_sid)
+_plan = _s.get("plan") or {}
+_venue = _plan.get("venue") or {}
+_ver = _venue.get("verification") or {}
+
+check("low-budget group RESOLVES (not the failure screen)",
+      _s.get("phase") == "plan_ready" and not _s.get("booking_failed"),
+      f"phase={_s.get('phase')} failed={_s.get('booking_failed')}")
+check("chosen venue is a REAL verified Places venue",
+      _ver.get("verification_status") == "verified", str(_ver.get("verification_status")))
+check("price is labelled approximate (verified · price approximate)",
+      _ver.get("price_confidence") == "approximate" and _plan.get("price_confidence") == "approximate",
+      f"ver={_ver.get('price_confidence')} plan={_plan.get('price_confidence')}")
+check("per_person is the honest estimate <= budget, NOT the old $45",
+      _plan.get("per_person") is not None and _plan.get("per_person") <= 15 and _plan.get("per_person") != 45,
+      str(_plan.get("per_person")))
+check("budget nudge is data-derived from a CONFIRMED-price venue and >= budget",
+      _s.get("suggested_min_budget") == 40, str(_s.get("suggested_min_budget")))
+
+# Confirmed-price path intact: a priced venue is 'confirmed', not approximate.
+_c = GP.normalize_verified_place(_REST, query="halal restaurant", budget_max=60)
+check("confirmed-price venue -> price_confidence 'confirmed'",
+      _c is not None and _c.get("price_confidence") == "confirmed", str(_c and _c.get("price_confidence")))
+check("confirmed-price venue keeps the real band price (MODERATE -> 40)",
+      _c is not None and _c.get("price_per_head") == 40, str(_c and _c.get("price_per_head")))
+
+# ORK-001 frozen: unchanged by the agents/** edits.
+S.seed_demo()
+_ork = (S.get("ORK-001") or {}).get("plan", {})
+check("ORK-001 stays per_person=80 (frozen)", _ork.get("per_person") == 80, str(_ork.get("per_person")))
+check("ORK-001 carries no approximate price flag", _ork.get("price_confidence") in (None,), str(_ork.get("price_confidence")))
 
 print("\n" + "=" * 60)
 if _failures:

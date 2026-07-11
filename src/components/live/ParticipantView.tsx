@@ -162,6 +162,7 @@ export function ParticipantView({ roomId, memberId }: { roomId: string; memberId
   // (no sample venue, no stale receipt) instead of a plan on the participant phone.
   const failed = IS_LIVE_MODE && Boolean(data?.phase === "failed" || data?.booking_failed);
   const failReason = data?.fail_reason ?? null;
+  const suggestedMinBudget = data?.suggested_min_budget ?? null;
   const noVenue = IS_LIVE_MODE && !isRealVenue(displayPlan);
   const awaitingFreshProof = IS_LIVE_MODE && !receipt.isFresh;
 
@@ -367,12 +368,20 @@ export function ParticipantView({ roomId, memberId }: { roomId: string; memberId
       {stage === "final" ? (
         <section className={s.phoneStage} aria-label="Your plan">
           {failed ? (
-            <LiveFailureCard failReason={failReason} venueStatus={data?.venue_status ?? null} />
+            <LiveFailureCard
+              failReason={failReason}
+              venueStatus={data?.venue_status ?? null}
+              suggestedMinBudget={suggestedMinBudget}
+            />
           ) : noVenue || !displayPlan ? (
             <NoVerifiedVenueCard />
           ) : (
             <>
-              <FinalPlanCard plan={displayPlan} members={roster} />
+              <FinalPlanCard
+                plan={displayPlan}
+                members={roster}
+                suggestedMinBudget={suggestedMinBudget}
+              />
               <PaymentProofCard receipt={receipt} awaitingFreshProof={awaitingFreshProof} />
               <ParticipantSplitCard
                 split={mySplit}

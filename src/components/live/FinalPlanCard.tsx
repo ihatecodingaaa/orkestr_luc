@@ -11,7 +11,7 @@ function prettyTag(tag: string): string {
 
 // Reasons adapt to the real plan when possible, with a sensible fallback so the
 // card always reads well even if the backend returns a different venue.
-function buildReasons(plan: Plan): string[] {
+function buildReasons(plan: Plan, approx: boolean): string[] {
   const reasons: string[] = [];
   const tags = plan.venue?.tags ?? [];
   const dietTags = tags.filter((t) => /halal|veg|options|raw/.test(t));
@@ -19,7 +19,11 @@ function buildReasons(plan: Plan): string[] {
     reasons.push(`Menu covers ${dietTags.map(prettyTag).join(", ")}`);
   }
   if (typeof plan.per_person === "number") {
-    reasons.push(`$${plan.per_person} a head lands inside everyone's budget`);
+    reasons.push(
+      approx
+        ? `About $${plan.per_person} a head (price approximate) — within everyone's budget`
+        : `$${plan.per_person} a head lands inside everyone's budget`,
+    );
   }
   if (plan.day || plan.time) {
     reasons.push(`${plan.day ?? "FRI"} ${plan.time ?? "19:30"} is the night that works for all five`);
@@ -27,13 +31,34 @@ function buildReasons(plan: Plan): string[] {
   return reasons.length >= 2 ? reasons : WHY_THIS_WON;
 }
 
-export function FinalPlanCard({ plan, members }: { plan: Plan; members: Member[] }) {
+export function FinalPlanCard({
+  plan,
+  members,
+  suggestedMinBudget,
+}: {
+  plan: Plan;
+  members: Member[];
+  suggestedMinBudget?: number | null;
+}) {
   const tags = plan.venue?.tags ?? [];
   const satisfies = plan.satisfies ?? [];
   const happyIds = satisfies.length ? satisfies : members.map((m) => m.id);
   const seats = members.length || 5;
-  const reasons = buildReasons(plan);
   const verification = plan.venue?.verification;
+  // Price truth: the venue IS verified; only the price may be an estimate. When so,
+  // we keep the verified badge and add an honest "price approximate" chip — we never
+  // show the per-head as if it were confirmed.
+  const priceApprox =
+    verification?.price_confidence === "approximate" || plan.price_confidence === "approximate";
+  // Prefer the backend's grounded, occasion-aware reasons (describe the REAL chosen
+  // venue); fall back to the local reason builder if the backend sent none.
+  const backendReasons = (plan.why_reasons ?? []).filter((r) => typeof r === "string" && r.trim());
+  const reasons = backendReasons.length >= 2 ? backendReasons : buildReasons(plan, priceApprox);
+  const occasion = (plan.occasion ?? []).filter((o) => typeof o === "string" && o.trim());
+  // Nudge only makes sense while the shown price is approximate and there is a real,
+  // higher confirmed-price floor to bump to.
+  const showNudge =
+    priceApprox && typeof suggestedMinBudget === "number" && suggestedMinBudget > 0;
 
   return (
     <div className={s.planCard}>
@@ -48,6 +73,11 @@ export function FinalPlanCard({ plan, members }: { plan: Plan; members: Member[]
         <div className={s.planHeadRight}>
           <StatusPill kind="done">Booked</StatusPill>
           <VenueBadge verification={verification} />
+          {priceApprox ? (
+            <span className={s.planTag} title="Verified venue; price is an estimate">
+              Price approximate
+            </span>
+          ) : null}
         </div>
       </div>
 
@@ -55,10 +85,20 @@ export function FinalPlanCard({ plan, members }: { plan: Plan; members: Member[]
 
       <div className={s.planFacts}>
         <Fact label="When" value={`${plan.day ?? "FRI"} · ${plan.time ?? "19:30"}`} />
-        <Fact label="Per person" value={money(plan.per_person)} />
+        <Fact
+          label="Per person"
+          value={priceApprox ? `~${money(plan.per_person)}` : money(plan.per_person)}
+        />
         <Fact label="Table" value={`${seats} seats`} />
         <Fact label="Booking" value={plan.booking_ref ?? "confirmed"} />
       </div>
+
+      {showNudge ? (
+        <p className={s.muted}>
+          Showing verified options at ~{money(plan.per_person)}/head (price approximate). Bump your
+          minimum to ~${suggestedMinBudget}/head for confirmed-price restaurants.
+        </p>
+      ) : null}
 
       {tags.length ? (
         <div className={s.planTags}>
@@ -84,6 +124,9 @@ export function FinalPlanCard({ plan, members }: { plan: Plan; members: Member[]
 
       <div className={s.planBlock}>
         <span className={s.blockLabel}>Why this place won</span>
+        {occasion.length ? (
+          <p className={s.muted}>Picked for a {occasion.join(" / ")} — matched to the group&apos;s note.</p>
+        ) : null}
         <ul className={s.whyList}>
           {reasons.map((r) => (
             <li key={r}>{r}</li>

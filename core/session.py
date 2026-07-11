@@ -413,12 +413,18 @@ def generate_real_plan(sid):
     # never exceed budget_max.
     have_budget = isinstance(budget_max, (int, float)) and not isinstance(budget_max, bool)
     have_est = isinstance(est_per_head, (int, float)) and not isinstance(est_per_head, bool)
+    # Price truth (closes the last unpriced path): a Google price-band estimate is
+    # CONFIRMED; a budget-tier fallback (no price data) is APPROXIMATE and labelled
+    # so — never a hard price shown as if confirmed.
     if have_est:
         per_person = min(est_per_head, budget_max) if have_budget else est_per_head
+        price_confidence = "confirmed"
     elif have_budget:
         per_person = budget_max  # conservative fallback, never above budget
+        price_confidence = "approximate"
     else:
         per_person = 0
+        price_confidence = "approximate"
     plan = {
         "plan_id": "REAL-" + sid,
         "title": f"{str(cuisine).title()} in {location}",
@@ -434,6 +440,7 @@ def generate_real_plan(sid):
         "activity": {"name": f"Explore {location}"},
         "total_cost": per_person * group_size,
         "per_person": per_person,
+        "price_confidence": price_confidence,
         "booking_ref": None,
         "mandate_status": "pending",
         "satisfies": [m.get("id") for m in members if isinstance(m, dict)],
@@ -537,6 +544,33 @@ def _compute_plan_body(sid, member_ids=None):
 
         strict = is_strict_real_venues()
         grounded = google_venues + exa_venues
+        # Data-derived budget nudge (additive; real Places data only, never invented):
+        # the cheapest CONFIRMED-price verified venue found this search. Stored on the
+        # session and shown by the UI ONLY when the shown result is approximate-only or
+        # fails, so the user can raise their minimum to reach confirmed-price venues.
+        _budgets = [b for m in members if isinstance(m, dict)
+                    for b in [(m.get("constraints") or {}).get("budget_max")]
+                    if isinstance(b, (int, float)) and not isinstance(b, bool) and b > 0]
+        _gmin = min(_budgets) if _budgets else None
+        _confirmed = [c.get("price_per_head") for c in google_venues
+                      if isinstance(c, dict) and c.get("price_confidence") == "confirmed"
+                      and isinstance(c.get("price_per_head"), (int, float))
+                      and not isinstance(c.get("price_per_head"), bool)]
+        s.pop("suggested_min_budget", None)
+        s.pop("suggested_reason", None)
+        if _confirmed and _gmin is not None and min(_confirmed) > _gmin:
+            s["suggested_min_budget"] = int(min(_confirmed))
+            s["suggested_reason"] = "confirmed-price restaurants start around here"
+        # Grounded, occasion-aware ranking of the REAL candidates (Stage C). Reorders
+        # the pool so the best-fit real venue is considered first; NEVER sources or
+        # invents a venue. LLM path only when USE_LLM_RANKER=true + key, else a
+        # deterministic ranker; an off-list/invalid model choice is rejected upstream.
+        from ai import venue_ranker
+        _notes = " ".join(str(m.get("freeform") or "") for m in members
+                          if isinstance(m, dict)).strip()
+        _ranking = venue_ranker.rank_venues(google_venues, members, _notes)
+        google_venues = _ranking.get("candidates") or google_venues
+        grounded = google_venues + exa_venues
         # In strict mode the planner may ONLY choose from grounded venues; sample
         # venues are excluded so a fake/sample place can never win.
         venues = filter_pool_for_strict(seed_venues, grounded, strict=strict)
@@ -584,6 +618,25 @@ def _compute_plan_body(sid, member_ids=None):
             db.set_session(sid, s)  # write-through AFTER mutation (fail-closed)
             return s
         s["venue_status"] = decision["venue_status"]
+        # Additive: surface the chosen venue's price confidence on the plan so the UI
+        # shows "Google Places verified · price approximate" honestly (the venue IS
+        # verified; only the price is an estimate). Confirmed-price venues are unmarked.
+        _pc = (((s["plan"] or {}).get("venue") or {}).get("verification") or {}).get("price_confidence")
+        if _pc:
+            s["plan"]["price_confidence"] = _pc
+        # Grounded "why this place won" reasons (additive), FACT-ASSEMBLED for the
+        # ACTUAL displayed venue from its real candidate record + the group's own
+        # occasion/day input. Never model prose, so no ungrounded amenity can appear
+        # even when negotiation picks a different venue than the ranker's top choice.
+        _cv = (s["plan"] or {}).get("venue") or {}
+        _cid = str(_cv.get("id") or "")
+        _cand = venue_ranker._find_by_id(google_venues, _cid) if _cid else None
+        _reasons = venue_ranker.reasons_for(_cand, members, _notes) if _cand else []
+        if _reasons:
+            s["plan"]["why_reasons"] = _reasons
+        if _ranking.get("occasion"):
+            s["plan"]["occasion"] = _ranking["occasion"]
+        s["plan"]["ranker_source"] = _ranking.get("source")
 
     # HARD LIVE-FLOW SAFETY GATE (defense-in-depth, computed as early as possible).
     # A real x402 USDC payment is attempted ONLY when this is a live session AND
@@ -676,9 +729,18 @@ def _compute_plan_body(sid, member_ids=None):
                 # the grounding block).
                 if fresh and fresh.get("plan") and fresh["plan"].get("venue"):
                     v = fresh["plan"]["venue"]
-                    if not v.get("verification_status") or v.get("verification_status") == "unverified":
-                        v["verification_status"] = "verified"
-                        v["badge"] = "Google Places verified"
+                    ver = v.get("verification") if isinstance(v.get("verification"), dict) else None
+                    if ver is None or ver.get("verification_status") in (None, "unverified"):
+                        # Build a proper verification block (read by /public + the UI)
+                        # and carry the plan's price_confidence so a price-approximate
+                        # fallback shows "verified · price approximate", never a hard
+                        # price as if confirmed.
+                        v["verification"] = {
+                            "verification_status": "verified",
+                            "source_kind": "google_places",
+                            "badge": "Google Places verified",
+                            "price_confidence": (fresh["plan"] or {}).get("price_confidence"),
+                        }
                         db.set_session(sid, fresh)
                 return fresh
             except Exception as e:

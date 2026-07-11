@@ -846,6 +846,8 @@ export function GroupRoom({
       pub.data?.booking_failed,
   );
   const failReason = state?.failReason ?? pub.data?.fail_reason ?? null;
+  // Data-derived budget nudge (real Places data only; shown on approximate/fail).
+  const suggestedMinBudget = pub.data?.suggested_min_budget ?? null;
 
   // Quorum planning (P2.2). Backend snapshot is the honest source; fall back to
   // local readiness only when offline. "Start draft now" is presenter-only and
@@ -1097,6 +1099,7 @@ export function GroupRoom({
                 <LiveFailureCard
                   failReason={failReason}
                   venueStatus={venueStatus}
+                  suggestedMinBudget={suggestedMinBudget}
                   onEditConstraints={backToRoom}
                   onRetry={retryPlan}
                   onRelax={backToRoom}
@@ -1145,7 +1148,11 @@ export function GroupRoom({
                       </span>
                     </div>
                   ) : null}
-                  <FinalPlanCard plan={displayPlan} members={roomMembers} />
+                  <FinalPlanCard
+                    plan={displayPlan}
+                    members={roomMembers}
+                    suggestedMinBudget={suggestedMinBudget}
+                  />
                   <TrustPanel
                     verification={displayPlan.venue?.verification}
                     split={split}
