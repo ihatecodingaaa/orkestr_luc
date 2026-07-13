@@ -103,14 +103,16 @@ export type Handshake = {
   merchant?: string;
 };
 
+// Friend-to-friend legs are NEVER on-chain — friends hold no wallets. A transfer
+// is honest tracked state only: pending until someone marks it paid (by their
+// usual method — PayNow/Venmo/cash). No tx hash, no rail, no chain claim.
 export type Transfer = {
   from?: string;
   to?: string;
   amount?: number;
-  rail?: string;
-  status?: string;
-  tx_hash?: string | null;
-  latency_ms?: number;
+  status?: "pending" | "marked_paid" | string;
+  marked_by?: string;
+  marked_at?: string;
 };
 
 export type Settlement = {
@@ -327,10 +329,55 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
+// ---- room auth tokens ------------------------------------------------------
+// Stage C: mutating endpoints verify WHO acts. The host token is minted at room
+// creation; a member token is minted when a guest claims their slot (first
+// constraints submit). Both live in browser storage — invisible to the user, so
+// guest join stays "tap the link and you're in": no account, no password.
+
+function tokenStore(): Storage | null {
+  try {
+    return typeof window !== "undefined" ? window.localStorage : null;
+  } catch {
+    return null;
+  }
+}
+
+export function storeHostToken(sessionId: string, token: string): void {
+  tokenStore()?.setItem(`ork_host_${sessionId}`, token);
+}
+
+export function storeMemberToken(sessionId: string, personId: string, token: string): void {
+  tokenStore()?.setItem(`ork_member_${sessionId}_${personId}`, token);
+}
+
+// Member token when acting as a specific person (falls back to the host token,
+// which the backend accepts for presenter room control / Demo Mode simulation).
+export function roomToken(sessionId: string, personId?: string): string | null {
+  const store = tokenStore();
+  if (!store) return null;
+  if (personId) {
+    const member = store.getItem(`ork_member_${sessionId}_${personId}`);
+    if (member) return member;
+  }
+  return store.getItem(`ork_host_${sessionId}`);
+}
+
+function authHeaders(sessionId: string, personId?: string): Record<string, string> {
+  const token = roomToken(sessionId, personId);
+  return token ? { "X-Orkestr-Token": token } : {};
+}
+
 // ---- live session lifecycle ----------------------------------------------
 
 export async function createLiveSession(): Promise<{ session_id: string; members: Member[] }> {
-  return fetchJson("/api/session/live", { method: "POST", body: "{}" });
+  const res = await fetchJson<{ session_id: string; members: Member[]; host_token?: string }>(
+    "/api/session/live",
+    { method: "POST", body: "{}" },
+  );
+  // The host token is returned exactly once, at creation — keep it immediately.
+  if (res.host_token) storeHostToken(res.session_id, res.host_token);
+  return res;
 }
 
 export async function submitConstraints(
@@ -338,8 +385,9 @@ export async function submitConstraints(
   member: Member,
   c: Constraints,
 ): Promise<void> {
-  await fetchJson("/api/constraints", {
+  const res = await fetchJson<{ ok: boolean; member_token?: string }>("/api/constraints", {
     method: "POST",
+    headers: authHeaders(sessionId, member.id),
     body: JSON.stringify({
       session_id: sessionId,
       id: member.id,
@@ -352,11 +400,14 @@ export async function submitConstraints(
       freeform: c.freeform,
     }),
   });
+  // First claim of this slot mints the member token — returned once, kept here.
+  if (res.member_token) storeMemberToken(sessionId, member.id, res.member_token);
 }
 
 export async function markReady(sessionId: string, personId: string): Promise<void> {
   await fetchJson(`/api/ready/${sessionId}`, {
     method: "POST",
+    headers: authHeaders(sessionId, personId),
     body: JSON.stringify({ person_id: personId }),
   });
 }
@@ -373,6 +424,7 @@ export async function startDraft(
 ): Promise<StatusResponse & { ok?: boolean }> {
   return fetchJson<StatusResponse & { ok?: boolean }>(`/api/session/${sessionId}/draft`, {
     method: "POST",
+    headers: authHeaders(sessionId), // host-only presenter action
     body: "{}",
   });
 }
@@ -383,15 +435,30 @@ export async function startDraft(
 export const updateDraft = startDraft;
 
 // Safe to poll from any device — read-only, never triggers the pipeline.
-export async function readPublicSession(sessionId: string): Promise<PublicSession> {
-  return fetchJson<PublicSession>(`/api/session/${sessionId}/public`);
+// A stored host/member token unlocks constraint detail (budgets/diets/notes);
+// unauthenticated viewers get names + status only.
+export async function readPublicSession(
+  sessionId: string,
+  viewerId?: string,
+): Promise<PublicSession> {
+  return fetchJson<PublicSession>(`/api/session/${sessionId}/public`, {
+    headers: authHeaders(sessionId, viewerId),
+  });
 }
 
-export async function approveTransfer(sessionId: string, personId: string): Promise<void> {
+// Mark a member's owed transfers as paid (they settled by their usual method —
+// PayNow/Venmo/cash). Pure tracked state on the backend; never a payment.
+export async function markTransferPaid(sessionId: string, personId: string): Promise<void> {
   await fetchJson(`/api/settle/${sessionId}`, {
     method: "POST",
+    headers: authHeaders(sessionId, personId),
     body: JSON.stringify({ person_id: personId }),
   });
+}
+
+// Read the current who-owes-who settlement. Pure read; never computes a plan.
+export async function getSettlement(sessionId: string): Promise<Settlement> {
+  return fetchJson<Settlement>(`/api/settlement/${sessionId}`);
 }
 
 // Like fetchJson but returns null on a 409 not_ready — a pure-read endpoint whose

@@ -31,7 +31,7 @@ const STEPS = [
   {
     label: "object",
     labelColor: "#D85A30",
-    message: "$70/head > Bob's $40 cap",
+    message: "Bob can't do Saturday either",
     activeIdx: 1,
     counter: "3→2",
   },

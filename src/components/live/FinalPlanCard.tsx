@@ -41,8 +41,10 @@ export function FinalPlanCard({
   suggestedMinBudget?: number | null;
 }) {
   const tags = plan.venue?.tags ?? [];
-  const satisfies = plan.satisfies ?? [];
-  const happyIds = satisfies.length ? satisfies : members.map((m) => m.id);
+  // Honest happy count: when the plan carries a satisfies array, render EXACTLY
+  // it — an empty array means nobody was satisfied, never "everyone". Only a
+  // plan with no satisfies field at all (legacy shape) falls back to members.
+  const happyIds = Array.isArray(plan.satisfies) ? plan.satisfies : members.map((m) => m.id);
   const seats = members.length || 5;
   const verification = plan.venue?.verification;
   // Price truth: the venue IS verified; only the price may be an estimate. When so,
@@ -71,7 +73,9 @@ export function FinalPlanCard({
           </p>
         </div>
         <div className={s.planHeadRight}>
-          <StatusPill kind="done">Booked</StatusPill>
+          {/* Honest status: Orkestr prepares a booking HANDOFF (Maps/site/call) —
+              it does not hold real restaurant inventory, so never "Booked". */}
+          <StatusPill kind="done">Handoff ready</StatusPill>
           <VenueBadge verification={verification} />
           {priceApprox ? (
             <span className={s.planTag} title="Verified venue; price is an estimate">
@@ -84,13 +88,19 @@ export function FinalPlanCard({
       <VenueEvidence verification={verification} />
 
       <div className={s.planFacts}>
-        <Fact label="When" value={`${plan.day ?? "FRI"} · ${plan.time ?? "19:30"}`} />
+        {/* The time is the group's suggested slot — no live inventory holds it. */}
+        <Fact label="When (suggested)" value={`${plan.day ?? "FRI"} · ${plan.time ?? "19:30"}`} />
         <Fact
           label="Per person"
           value={priceApprox ? `~${money(plan.per_person)}` : money(plan.per_person)}
         />
         <Fact label="Table" value={`${seats} seats`} />
-        <Fact label="Booking" value={plan.booking_ref ?? "confirmed"} />
+        {/* Never claim "confirmed": a ref only exists for the seeded/demo room;
+            live rooms get a booking handoff (reserve via Maps or call). */}
+        <Fact
+          label="Booking"
+          value={plan.booking_ref ? `${plan.booking_ref} (demo)` : "Handoff — reserve via Maps or call"}
+        />
       </div>
 
       {showNudge ? (
@@ -118,7 +128,7 @@ export function FinalPlanCard({
               <Avatar key={id} id={id} size={30} ring />
             ))}
           </div>
-          <span className={s.satCount}>{happyIds.length}/5 happy</span>
+          <span className={s.satCount}>{happyIds.length}/{seats} happy</span>
         </div>
       </div>
 

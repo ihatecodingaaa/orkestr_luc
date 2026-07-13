@@ -1,4 +1,4 @@
-"""Smoke for session-linked meal split (P1.3).
+﻿"""Smoke for session-linked meal split (P1.3).
 
 Asserts /api/split is tied to the room's members + orders (not global canned
 data), carries an honest split_source, reconciles exactly, and responds to order
@@ -32,7 +32,7 @@ def check(label, ok, detail=""):
     if ok:
         print(f"  [PASS] {label}")
     else:
-        print(f"  [FAIL] {label}" + (f" — {detail}" if detail else ""))
+        print(f"  [FAIL] {label}" + (f" â€” {detail}" if detail else ""))
         _failures.append(label)
 
 
@@ -43,9 +43,28 @@ def cents(x):
 print("Split from session smoke (P1.3)")
 print("=" * 60)
 
-# 1. Two distinct sessions -> session-linked drafts that differ.
-a = client.post("/api/session/live", json={}).json()["session_id"]
-b = client.post("/api/session/live", json={}).json()["session_id"]
+# 1. Two distinct sessions -> session-linked drafts that differ. The draft menu
+# rotates by crc32(session_id) % len(menu); with high-entropy ids (Stage C) two
+# random ids can land on the same rotation, so pick B with a DIFFERENT rotation —
+# that's the exact property the rotation is meant to provide.
+import zlib
+
+_a = client.post("/api/session/live", json={}).json()
+a = _a["session_id"]
+
+
+def _rot(sid):
+    return zlib.crc32(sid.encode()) % 8  # len(core.session._DRAFT_MENU)
+
+
+b = a
+for _ in range(20):
+    _b = client.post("/api/session/live", json={}).json()
+    b = _b["session_id"]
+    if _rot(b) != _rot(a):
+        break
+# Stage C: replacing the room's orders is a host-only action.
+HOST_A = {"X-Orkestr-Token": _a.get("host_token") or ""}
 sa = client.get(f"/api/split/{a}").json()
 sb = client.get(f"/api/split/{b}").json()
 
@@ -76,7 +95,7 @@ items = [
     {"id": "platter", "name": "Sharing platter", "price": 50.0, "quantity": 1,
      "assigned_to": [], "shared_by": [m0, m1], "category": "shared"},
 ]
-edited = client.post(f"/api/split/{a}/orders", json={"items": items}).json()
+edited = client.post(f"/api/split/{a}/orders", headers=HOST_A, json={"items": items}).json()
 check("edit source == backend_live_orders", edited.get("split_source") == "backend_live_orders", str(edited.get("split_source")))
 check("edit changed the total", edited["total"] != sa["total"], f'{sa["total"]} -> {edited["total"]}')
 check("edit reconciles exactly", edited.get("totals_reconcile") is True, str(edited.get("totals_reconcile")))
@@ -105,7 +124,7 @@ check("participant share for m0 matches backend row",
       m0_again["total"] == by_id[m0]["total"], f'{m0_again["total"]} vs {by_id[m0]["total"]}')
 
 # 6. Unknown-member assignments are dropped (validation), not trusted.
-bad = client.post(f"/api/split/{a}/orders", json={"items": [
+bad = client.post(f"/api/split/{a}/orders", headers=HOST_A, json={"items": [
     {"id": "x", "name": "Ghost", "price": 10, "quantity": 1,
      "assigned_to": ["P-NOPE"], "shared_by": [], "category": "personal"}]}).json()
 check("unknown assignee dropped -> item unassigned, total 0",
@@ -113,7 +132,7 @@ check("unknown assignee dropped -> item unassigned, total 0",
       f'total={bad.get("total")} unassigned={bad.get("unassigned_items")}')
 
 # 7. Bad body -> 400.
-r = client.post(f"/api/split/{a}/orders", json={"items": "nope"})
+r = client.post(f"/api/split/{a}/orders", headers=HOST_A, json={"items": "nope"})
 check("non-list items -> 400", r.status_code == 400, str(r.status_code))
 
 print("\n" + "=" * 60)

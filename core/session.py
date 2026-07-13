@@ -1,26 +1,29 @@
 """In-memory session store + state machine for the full Orkestr webapp.
 
 Seeded with a default demo session (ORK-001) so every screen has data on boot.
-Hackathon approach: REAL endpoints, SEEDED data underneath — swap the stubs for
-real negotiation/constraint logic per the Build Guide without touching the API.
+Constraint evaluation is REAL everywhere (agents/persona.stance — day overlap,
+budget ceiling, dietary match); venue selection is constraint filtering + LLM
+ranking. ORK-001 is explicitly-labelled scripted demo data, and even its
+satisfies list is computed by the real engine, never stamped.
 
 Owner: Lucas (session plumbing) + Jaydon (the agent calls).
 """
 import json
 import logging
 import os
+import secrets
 import threading
 import time
 import uuid
 
 from fastapi import HTTPException
 
-from agents.convener import (generate_candidates, run_negotiation, strike_booking,
-                             _seeded_messages)
+from agents.convener import (generate_candidates, run_negotiation, seeded_demo_booking,
+                             strike_booking, _annotate_plan, _seeded_messages)
+from agents.persona import stance
 from core import db
 from core.meal_split import _money, _to_cents, allocate_cents
 from core.settlement import compute_net, simplify
-from payments.x402 import stamp
 
 DATA = os.path.join(os.path.dirname(__file__), "..", "data")
 PHASES = ["negotiating", "plan_ready", "booking", "confirmed"]
@@ -84,7 +87,11 @@ def _members(s):
 
 
 def new_session(name=None, date_range=None):
-    sid = "ORK-" + uuid.uuid4().hex[:4].upper()
+    # Unguessable room id: the old "ORK-" + 4 hex chars gave a ~65k space that a
+    # stranger could enumerate. token_urlsafe(16) is 22 URL-safe chars (128 bits)
+    # — unenumerable. ORK-001 (the seeded demo) is the only short id and is
+    # special-cased everywhere.
+    sid = "ORK-" + secrets.token_urlsafe(16)
     s = {
         "session_id": sid,
         "name": name or "Friday plan",
@@ -97,9 +104,33 @@ def new_session(name=None, date_range=None):
         "approvals": [],
         "expenses": [],
         "settlement": None,
+        # Server-side room auth (NEVER returned by any read endpoint):
+        #   host    — presenter token, returned ONCE to the room creator
+        #   members — member_id -> token, minted when a guest claims their slot
+        "_auth": {"host": secrets.token_urlsafe(24), "members": {}},
     }
     db.set_session(sid, s)  # write-through AFTER building the new session
     return s
+
+
+def mint_member_token(sid, member_id):
+    """Mint (or refuse) the member token for a slot — the join-time identity bind.
+
+    First claim mints a token, stores it server-side, and returns (token, True) —
+    the caller returns it ONCE to that client. An already-claimed slot returns
+    (None, False): the claimant must present the existing token instead.
+    """
+    s = db.get_session(sid)
+    if s is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    auth = s.setdefault("_auth", {"host": None, "members": {}})
+    members = auth.setdefault("members", {})
+    if member_id in members:
+        return None, False
+    token = secrets.token_urlsafe(24)
+    members[member_id] = token
+    db.set_session(sid, s)  # persist the mint before it is returned
+    return token, True
 
 
 def new_live_session(name=None, date_range=None):
@@ -443,9 +474,14 @@ def generate_real_plan(sid):
         "price_confidence": price_confidence,
         "booking_ref": None,
         "mandate_status": "pending",
-        "satisfies": [m.get("id") for m in members if isinstance(m, dict)],
+        "satisfies": [],
         "conflicts": [],
     }
+    # Honest happy count: satisfies/conflicts come from REAL per-member stance
+    # evaluation (day / budget / dietary) against THIS plan — the old code
+    # stamped every member as satisfied without evaluating anyone.
+    plan = _annotate_plan(
+        plan, [stance(m, plan) for m in members if isinstance(m, dict)])
     if photo_name is not None:
         # Store only the photo REFERENCE (no API key, no Google URL). The
         # /api/venue/photo proxy assembles the real URL server-side, so the key
@@ -649,6 +685,32 @@ def _compute_plan_body(sid, member_ids=None):
     from payments.x402_protocol import is_live_real_x402_enabled
     allow_x402 = bool(s.get("live")) and is_live_real_x402_enabled()
     booking = strike_booking(s["plan"], allow_x402=allow_x402)
+
+    # HONESTY GATE: a failed booking is a FAILED room — never a fake confirmation.
+    # strike_booking returns booking_failed=True (with a specific fail_reason) when
+    # the venue/payment flow raised; the old code silently fabricated a co-signed
+    # mandate + booking_ref + "confirmed" order here. Route to the real failure UI
+    # instead. No handshake, no booking_ref, no x402 receipt daemon on this path.
+    if booking.get("booking_failed"):
+        s["handshake"] = None
+        s["booking_failed"] = True
+        s["fail_reason"] = booking.get("fail_reason") or "booking failed"
+        s["phase"] = "failed"
+        db.set_session(sid, s)  # write-through (booking failure; no receipt fires)
+        return s
+
+    # Same rule for an x402 controlled payment failure (REQUIRE_REAL_X402 path):
+    # the payment did not complete, so no booking exists to confirm.
+    if booking["mandate"].get("status") == "payment_failed":
+        x402_info = booking["mandate"].get("x402") or {}
+        s["handshake"] = None
+        s["booking_failed"] = True
+        s["fail_reason"] = ("Payment failed — the required x402 payment did not "
+                            "complete. No charge was made."
+                            + (f" ({x402_info.get('reason')})" if x402_info.get("reason") else ""))
+        s["phase"] = "failed"
+        db.set_session(sid, s)  # write-through (payment failure; no receipt fires)
+        return s
 
     # AP2 tamper gate (P0.4): before ANY handshake-success state is written and
     # before the x402 receipt daemon can spawn, verify the co-signed mandate's cart
@@ -870,9 +932,12 @@ def recompute_settlement(sid):
     share_by_id = {pid: share_list[i] for i, pid in enumerate(order)}
     shares_cents = {pid: share_by_id.get(pid, 0) for pid in ids}
     net_cents = compute_net(fronted_cents, shares_cents)  # ints -> sums to exactly 0
+    # Friend-to-friend legs are NEVER on-chain (friends hold no wallets), so a
+    # transfer carries only honest tracked state: from/to/amount/status. Status is
+    # "pending" until someone marks it paid (marked_by/marked_at are then added).
+    # No tx hash, no rail, no latency — the system never fabricates chain proof.
     transfers = [
-        {**t, "amount": _money(t["amount"]), "rail": "x402", "status": "pending",
-         "tx_hash": None, "latency_ms": 1000}
+        {**t, "amount": _money(t["amount"]), "status": "pending"}
         for t in simplify(net_cents)  # greedy min-cash-flow on integer cents
     ]
     s["settlement"] = {
@@ -886,15 +951,24 @@ def recompute_settlement(sid):
     return s["settlement"]
 
 
-def approve_transfer(sid, person_id):
+def mark_transfer_paid(sid, person_id):
+    """Mark this person's outgoing transfers as paid — honest tracked state only.
+
+    Records WHO marked it and WHEN (server time). No hash, no chain, no fake
+    settlement: friends pay by their usual method (PayNow/Venmo/cash) and Orkestr
+    tracks it. Idempotent — a second call never overwrites the original marked_at.
+    """
+    from datetime import datetime, timezone
+
     s = db.get_session(sid)
     if s is None:
         raise HTTPException(status_code=404, detail="session not found")
     st = s["settlement"] or recompute_settlement(sid)
     for t in st["transfers"]:
         if t["from"] == person_id and t["status"] == "pending":
-            t["status"] = "settled"
-            t["tx_hash"] = stamp()
+            t["status"] = "marked_paid"
+            t["marked_by"] = person_id
+            t["marked_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     db.set_session(sid, s)  # write-through AFTER mutation
     return s
 
@@ -1079,10 +1153,20 @@ def seed_demo():
         "per_person": 80,
         "booking_ref": "SG-2026-0627-77",
         "mandate_status": "co-signed",
-        "satisfies": [p["id"] for p in s["members"] if isinstance(p, dict)],
+        "satisfies": [],
         "conflicts": [],
     }
+    # Even the frozen demo's "5/5 happy" is REAL: evaluated per member by the
+    # same stance engine live rooms use (the seeded personas/plan are built to
+    # genuinely satisfy everyone — never a stamped list).
+    seeded_plan = _annotate_plan(
+        seeded_plan, [stance(p, seeded_plan) for p in s["members"] if isinstance(p, dict)])
     booking = strike_booking(seeded_plan)
+    # ORK-001 is a scripted demo contract: if the sandbox ACP flow ever fails at
+    # seed time, use the explicitly-labelled seeded demo handshake — the demo room
+    # stays complete, and it is never presented as a real reservation.
+    if booking.get("booking_failed"):
+        booking = seeded_demo_booking(seeded_plan)
     # Back-cosign the seeded mandate (P0.4): strike_booking's ACP path omits the
     # cart_digest, so bind one now from its own items. ORK-001 then genuinely passes
     # mandate.verify() and displays co-signed + verified. Additive only — Seoul
@@ -1109,6 +1193,10 @@ def seed_demo():
         "merchant": booking["mandate"]["merchant"],
     }
     s["phase"] = "plan_ready"
+    # The seeded contract always renders complete: clear any failure state a
+    # (now honest) compute_plan booking failure may have left before the overrides.
+    s["booking_failed"] = False
+    s["fail_reason"] = None
     db.set_session("ORK-001", s)  # persist the frozen overrides before expenses
     for e in [
         {"paid_by": "P-001", "amount": 240, "description": "Dinner — KBBQ set", "split": "even"},

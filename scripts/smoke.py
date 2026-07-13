@@ -260,12 +260,19 @@ check("POST /api/settle/ORK-001 {P-004} -> 200",
 status, body = http("GET", "/api/settlement/ORK-001")
 transfers = (body or {}).get("transfers", [])
 p004_transfers = [t for t in transfers if t.get("from") == "P-004"]
-check("P-004 transfer status=settled after settle",
-      p004_transfers and p004_transfers[0].get("status") == "settled",
+check("P-004 transfer status=marked_paid after mark-as-paid",
+      p004_transfers and p004_transfers[0].get("status") == "marked_paid",
       str(p004_transfers))
-first_hash = p004_transfers[0].get("tx_hash") if p004_transfers else None
-check("P-004 tx_hash is non-null after settle",
-      bool(first_hash), f"got {first_hash}")
+check("P-004 transfer records marked_by",
+      p004_transfers and p004_transfers[0].get("marked_by") == "P-004",
+      str(p004_transfers))
+first_marked_at = p004_transfers[0].get("marked_at") if p004_transfers else None
+check("P-004 transfer records marked_at timestamp",
+      bool(first_marked_at), f"got {first_marked_at}")
+# Honesty contract: friend legs are NEVER on-chain — no fabricated hash/latency.
+check("no transfer carries tx_hash/latency_ms (no fabricated chain proof)",
+      all("tx_hash" not in t and "latency_ms" not in t for t in transfers),
+      str(transfers))
 
 status, body = http("POST", "/api/settle/ORK-001", {"person_id": "P-004"})
 check("POST /api/settle/ORK-001 {P-004} again -> 200 (idempotent)",
@@ -274,10 +281,10 @@ check("POST /api/settle/ORK-001 {P-004} again -> 200 (idempotent)",
 status, body = http("GET", "/api/settlement/ORK-001")
 transfers = (body or {}).get("transfers", [])
 p004_transfers = [t for t in transfers if t.get("from") == "P-004"]
-second_hash = p004_transfers[0].get("tx_hash") if p004_transfers else None
-check("P-004 tx_hash unchanged after second settle",
-      first_hash is not None and first_hash == second_hash,
-      f"first={first_hash} second={second_hash}")
+second_marked_at = p004_transfers[0].get("marked_at") if p004_transfers else None
+check("P-004 marked_at unchanged after second mark (idempotent)",
+      first_marked_at is not None and first_marked_at == second_marked_at,
+      f"first={first_marked_at} second={second_marked_at}")
 
 # ---------------------------------------------------------------------------
 section("OTHER FAIL BATTERY")
@@ -339,9 +346,9 @@ check("After reseed: 3 transfers",
 check("After reseed: all transfers pending",
       all(t.get("status") == "pending" for t in transfers),
       str([(t.get("from"), t.get("status")) for t in transfers]))
-check("After reseed: all tx_hash null",
-      all(t.get("tx_hash") is None for t in transfers),
-      str([(t.get("from"), t.get("tx_hash")) for t in transfers]))
+check("After reseed: no transfer carries tx_hash/latency_ms",
+      all("tx_hash" not in t and "latency_ms" not in t for t in transfers),
+      str(transfers))
 check("After reseed: sum(net)==0",
       sum(net.values()) == 0, f"sum={sum(net.values()) if net else 'n/a'}")
 check("After reseed: negotiation still 10 messages",

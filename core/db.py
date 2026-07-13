@@ -40,6 +40,30 @@ _CONN.execute(
 _CONN.commit()
 
 
+def _scrub_legacy_transfers(data):
+    """Migrate transfers persisted before the honest-settlement contract.
+
+    Old rows carried fabricated chain claims (rail "x402", tx_hash stamped from
+    random bits, invented latency_ms) and a "settled" status. Nothing on-chain
+    ever happened for friend legs, so on first load we drop the fabricated keys
+    and map "settled" -> "marked_paid" (the person DID tap the approve/settle
+    button; only the fake proof is removed — no timestamp is invented).
+    """
+    st = data.get("settlement") if isinstance(data, dict) else None
+    transfers = st.get("transfers") if isinstance(st, dict) else None
+    if not isinstance(transfers, list):
+        return data
+    for t in transfers:
+        if not isinstance(t, dict):
+            continue
+        for k in ("tx_hash", "latency_ms", "rail"):
+            t.pop(k, None)
+        if t.get("status") == "settled":
+            t["status"] = "marked_paid"
+            t.setdefault("marked_by", t.get("from"))
+    return data
+
+
 def get_session(sid):
     """Return the live cached session dict, loading from SQLite on first access.
 
@@ -54,7 +78,7 @@ def get_session(sid):
             "SELECT data FROM sessions WHERE id = ?", (sid,)).fetchone()
     if row is None:
         return None
-    data = json.loads(row[0])
+    data = _scrub_legacy_transfers(json.loads(row[0]))
     _CACHE[sid] = data
     return data
 

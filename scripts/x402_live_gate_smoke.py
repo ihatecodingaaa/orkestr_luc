@@ -120,12 +120,14 @@ def _run_live_session():
     live = client.post("/api/session/live", json={}).json()
     sid = live["session_id"]
     for m in live["members"]:
-        client.post("/api/constraints", json={
+        r = client.post("/api/constraints", json={
             "session_id": sid, "id": m["id"], "name": m["name"],
             "constraints": {"available_days": ["FRI"], "budget_max": 80, "dietary": []},
             "freeform": "",
-        })
-        client.post(f"/api/ready/{sid}", json={"person_id": m["id"]})
+        }).json()
+        # Stage C: the first submit mints the member token; ready requires it.
+        client.post(f"/api/ready/{sid}", json={"person_id": m["id"]},
+                    headers={"X-Orkestr-Token": r.get("member_token") or ""})
     status = client.get(f"/api/status/{sid}").json()
     hs = client.get(f"/api/handshake/{sid}").json()
     return sid, status, (hs or {}).get("mandate") or {}

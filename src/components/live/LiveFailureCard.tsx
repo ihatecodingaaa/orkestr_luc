@@ -10,6 +10,26 @@ function friendlyReason(
   venueStatus?: string | null,
 ): { subtitle: string; hint: string } {
   const r = (failReason ?? "").toLowerCase();
+  // Specific booking/payment failures first (their reasons also mention "venue"
+  // or "booking", so they must win over the generic no-verified-venue branch).
+  if (r.includes("timed out")) {
+    return {
+      subtitle: "The venue's booking service didn't respond — nothing was booked.",
+      hint: "Try again in a moment, or reserve directly via the venue links.",
+    };
+  }
+  if (r.includes("payment")) {
+    return {
+      subtitle: "The payment couldn't be authorized — nothing was booked and no charge was made.",
+      hint: "Try again, or adjust the plan and re-run it.",
+    };
+  }
+  if (r.includes("booking service") || r.includes("reservation request")) {
+    return {
+      subtitle: "The venue's booking service returned an error — nothing was booked.",
+      hint: "Try again, or reserve directly via Google Maps or by calling the venue.",
+    };
+  }
   if (
     venueStatus === "no_verified_venue" ||
     r.includes("verified") ||

@@ -13,7 +13,11 @@ import type { MealSplit, SplitMode } from "./split";
 // unreachable backend never breaks the demo.
 export function usePublicSession(
   sessionId: string | null,
-  { intervalMs = 2500, enabled = true }: { intervalMs?: number; enabled?: boolean } = {},
+  {
+    intervalMs = 2500,
+    enabled = true,
+    viewerId,
+  }: { intervalMs?: number; enabled?: boolean; viewerId?: string } = {},
 ) {
   const [data, setData] = useState<PublicSession | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -23,7 +27,9 @@ export function usePublicSession(
   const refresh = useCallback(async () => {
     if (!sessionId) return;
     try {
-      const snap = await readPublicSession(sessionId);
+      // viewerId picks the member token so a participant sees their own
+      // constraint detail; the presenter's host token unlocks the full view.
+      const snap = await readPublicSession(sessionId, viewerId);
       if (!aliveRef.current) return;
       setData(snap);
       setError(null);
@@ -38,7 +44,7 @@ export function usePublicSession(
         console.warn(`[orkestr] room sync unavailable for ${sessionId}:`, e);
       }
     }
-  }, [sessionId]);
+  }, [sessionId, viewerId]);
 
   useEffect(() => {
     aliveRef.current = true;

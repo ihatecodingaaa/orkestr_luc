@@ -8,11 +8,13 @@ Run from the repo root:
     uvicorn api.main:app --reload --port 8000
 """
 import asyncio
+import hmac
 import json
 import os
+import time
 from contextlib import asynccontextmanager
 
-from fastapi import Body, FastAPI, Header, HTTPException
+from fastapi import Body, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -54,6 +56,87 @@ def _require_session(sid: str) -> dict:
     if not s:
         raise HTTPException(status_code=404, detail="session not found")
     return s
+
+
+# ---------------------------------------------------------------------------
+# Room auth (Stage C). person_id used to be self-asserted — anyone with a room id
+# could approve/spend/settle as anyone. Now every MUTATING endpoint verifies the
+# caller's token (X-Orkestr-Token) against the identity it claims:
+#   * member token  — minted once when a guest claims their slot (join stays one
+#     tap: the token lives in browser storage, invisible to the user)
+#   * host token    — minted at room creation; required for presenter actions and
+#     accepted for member actions (presenter room control / Demo Mode simulation)
+# ORK-001 is the public seeded sandbox (reseedable, no real PII) and is exempt.
+# Reads never need a token; the room id itself is the view capability.
+# ---------------------------------------------------------------------------
+
+def _room_auth(s: dict) -> dict:
+    auth = s.get("_auth")
+    return auth if isinstance(auth, dict) else {}
+
+
+def _is_host(s: dict, token: str | None) -> bool:
+    host = _room_auth(s).get("host")
+    return bool(token and host and hmac.compare_digest(str(token), str(host)))
+
+
+def _is_member(s: dict, token: str | None, person_id: str | None) -> bool:
+    mt = (_room_auth(s).get("members") or {}).get(person_id or "")
+    return bool(token and mt and hmac.compare_digest(str(token), str(mt)))
+
+
+def _require_actor(s: dict, sid: str, token: str | None, person_id: str | None) -> None:
+    """403 unless the caller's token proves they are `person_id` (or the host)."""
+    if sid == "ORK-001":
+        return  # frozen public demo sandbox — reseedable, no real PII
+    if _is_host(s, token) or _is_member(s, token, person_id):
+        return
+    raise HTTPException(status_code=403,
+                        detail="member token required (you can only act as yourself)")
+
+
+def _require_host(s: dict, sid: str, token: str | None) -> None:
+    """403 unless the caller holds this room's host (presenter) token."""
+    if sid == "ORK-001":
+        return
+    if _is_host(s, token):
+        return
+    raise HTTPException(status_code=403, detail="host token required")
+
+
+# ---------------------------------------------------------------------------
+# Enumeration guard: per-IP counter over API 404s ("misses"). Legit users
+# almost never miss (their links carry real room ids); an enumerator misses on
+# nearly every probe. Too many misses in the window -> 429 for API paths. The
+# 22-char room ids are the real defense; this makes probing loud and slow too.
+# In-memory per process (fine for the single-process deploy).
+# ---------------------------------------------------------------------------
+_RL_MISS_LIMIT = int(os.environ.get("ORK_RL_MISS_LIMIT", "60"))
+_RL_WINDOW_SECONDS = int(os.environ.get("ORK_RL_WINDOW_SECONDS", "300"))
+_RL_BLOCK_SECONDS = int(os.environ.get("ORK_RL_BLOCK_SECONDS", "300"))
+_RL_STATE: dict = {}  # ip -> {"misses": [timestamps], "blocked_until": float}
+
+
+def _rl_scoped(path: str) -> bool:
+    return path.startswith("/api/") or path.startswith("/receipt/")
+
+
+@app.middleware("http")
+async def _enumeration_guard(request: Request, call_next):
+    ip = request.client.host if request.client else "unknown"
+    path = request.url.path
+    now = time.time()
+    entry = _RL_STATE.setdefault(ip, {"misses": [], "blocked_until": 0.0})
+    if _rl_scoped(path) and now < entry["blocked_until"]:
+        return JSONResponse(status_code=429,
+                            content={"detail": "too many attempts — slow down"})
+    response = await call_next(request)
+    if _rl_scoped(path) and response.status_code == 404:
+        entry["misses"] = [t for t in entry["misses"] if now - t < _RL_WINDOW_SECONDS]
+        entry["misses"].append(now)
+        if len(entry["misses"]) > _RL_MISS_LIMIT:
+            entry["blocked_until"] = now + _RL_BLOCK_SECONDS
+    return response
 
 
 def _require_field(body: dict, field: str) -> None:
@@ -179,18 +262,17 @@ def x402_demo_receipt_latest():
     return XDR.latest_receipt()
 
 
-def _demo_receipt_mock_fallback(mock_module, reason: str) -> dict:
+def _demo_receipt_mock_fallback(reason: str) -> dict:
     """Build a mock demo-receipt body when the live run times out or errors.
 
-    Uses the FROZEN mock stamp() (payments/x402.py) for a placeholder hash and
-    marks the body payment_mode="mock" + fallback_reason so a judge (and the
-    frontend) can see it was NOT a real on-chain settlement. No Basescan link is
-    claimed for the mock hash — real_tx_hash/explorer_url are null on this path.
+    Honesty rule: no settlement happened, so NO hash of any kind is emitted —
+    txHash is null (a random placeholder hex would be a fabricated transaction).
+    payment_mode="mock" + fallback_reason make the non-settlement explicit, and
+    real_tx_hash/explorer_url are null so no Basescan link is ever claimed.
     Mirrors the fresh-receipt shape so the frontend can render it unchanged.
     """
     from payments import x402_demo_receipt as XDR
 
-    mock_hash = mock_module.stamp()
     amount = XDR.get_amount()
     return {
         "ok": True,
@@ -202,7 +284,7 @@ def _demo_receipt_mock_fallback(mock_module, reason: str) -> dict:
         "amount_display": XDR._amount_display(amount),
         "buyer": None,
         "merchant": None,
-        "txHash": mock_hash,
+        "txHash": None,
         "blockExplorerUrl": None,
         "real_tx_hash": None,
         "explorer_url": None,
@@ -215,7 +297,6 @@ def _demo_receipt_mock_fallback(mock_module, reason: str) -> dict:
 @app.post("/api/x402/demo-receipt/run")
 async def x402_demo_receipt_run(payload: dict = Body(default={}),
                                 x_demo_secret: str = Header(default=None, alias="X-Orkestr-Demo-Secret")):
-    from payments import x402 as MOCK_X402
     from payments import x402_demo_receipt as XDR
 
     confirm = payload.get("confirm") if isinstance(payload, dict) else None
@@ -223,8 +304,8 @@ async def x402_demo_receipt_run(payload: dict = Body(default={}),
     # Run the (synchronous, never-raising) gated real-payment orchestrator in a
     # worker thread with an 8s ceiling so a slow/hung facilitator can never make
     # this request hang. On timeout or any unexpected error we DO NOT 502 — we
-    # fall back to the frozen mock stamp() and flag payment_mode="mock" so the
-    # endpoint always answers in <~8s. The upstream payment modules are untouched.
+    # return an honest hash-free mock body (payment_mode="mock", txHash null) so
+    # the endpoint always answers in <~8s. The upstream payment modules are untouched.
     loop = asyncio.get_running_loop()
     try:
         status_code, body_out = await asyncio.wait_for(
@@ -233,10 +314,10 @@ async def x402_demo_receipt_run(payload: dict = Body(default={}),
         )
     except asyncio.TimeoutError:
         return JSONResponse(status_code=200,
-                            content=_demo_receipt_mock_fallback(MOCK_X402, "timeout"))
+                            content=_demo_receipt_mock_fallback("timeout"))
     except Exception:  # defensive: run_demo_receipt is documented never to raise
         return JSONResponse(status_code=200,
-                            content=_demo_receipt_mock_fallback(MOCK_X402, "error"))
+                            content=_demo_receipt_mock_fallback("error"))
 
     # Additive aliases on the SUCCESS body only. Gate rejections (404/403/400/500/
     # 429/409) and the payment-failure (502) body are returned byte-identical to
@@ -414,7 +495,7 @@ def _receipt_card_body(ctx):
       </div>
 
       <div style="margin-top:16px;display:flex;justify-content:space-between;align-items:center;gap:12px;">
-        <span style="font-size:12px;text-transform:uppercase;letter-spacing:0.04em;color:#888;">Booking reference</span>
+        <span style="font-size:12px;text-transform:uppercase;letter-spacing:0.04em;color:#888;">Booking handoff ref</span>
         <span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:15px;font-weight:600;text-align:right;">{ctx['booking_ref']}</span>
       </div>
 
@@ -615,7 +696,9 @@ def demo_tamper_check(payload: dict = Body(default=None)):
 def session_start(payload: dict = Body(default={})):
     s = S.new_session(payload.get("name"), payload.get("date_range"))
     invite_url, _ = _invite_and_qr(s["session_id"])  # single helper (P1.4)
-    return {"session_id": s["session_id"], "invite_url": invite_url}
+    # host_token is returned ONCE, here, to the room creator only.
+    return {"session_id": s["session_id"], "invite_url": invite_url,
+            "host_token": (s.get("_auth") or {}).get("host")}
 
 
 # ---- QR join: a scannable invite that turns a judge's phone into a live node ----
@@ -671,29 +754,38 @@ def session_live(payload: dict = Body(default={})):
     return {
         "session_id": s["session_id"],
         "invite_url": invite_url,
+        # host_token is returned ONCE, here, to the room creator (presenter) only.
+        "host_token": (s.get("_auth") or {}).get("host"),
         "members": [{"id": m["id"], "name": m["name"], "avatar": m.get("avatar")}
                     for m in s["members"]],
     }
 
 
 @app.post("/api/session/clone/{sid}")
-def session_clone(sid: str):
+def session_clone(sid: str,
+                  x_orkestr_token: str = Header(default=None, alias="X-Orkestr-Token")):
     """Clone a settled session's crew into a fresh session for the next outing.
 
     "Friday coming up? Plan another dinner with this crew." Copies only the member
     id + name list (constraints come from group memory when members re-submit).
+    Host-token gated: only the source room's presenter can clone its crew.
     Unknown sid -> 404; ORK-001 -> 400 (frozen demo, never cloned). Returns
-    {session_id, invite_url} for the freshly created session.
+    {session_id, invite_url, host_token} for the freshly created session.
     """
+    src = _require_session(sid)
+    _require_host(src, sid, x_orkestr_token)
     s = S.clone_session(sid)
     invite_url, _ = _invite_and_qr(s["session_id"])
-    return {"session_id": s["session_id"], "invite_url": invite_url}
+    return {"session_id": s["session_id"], "invite_url": invite_url,
+            "host_token": (s.get("_auth") or {}).get("host")}
 
 
 @app.post("/api/ready/{sid}")
-def ready(sid: str, body: dict = Body(...)):
+def ready(sid: str, body: dict = Body(...),
+          x_orkestr_token: str = Header(default=None, alias="X-Orkestr-Token")):
     s = _require_session(sid)
     _require_field(body, "person_id")
+    _require_actor(s, sid, x_orkestr_token, body["person_id"])
     S.mark_ready(sid, body["person_id"])
     return {"ready": s.get("ready", []),
             "members_total": len(s["members"]),
@@ -701,12 +793,30 @@ def ready(sid: str, body: dict = Body(...)):
 
 
 @app.post("/api/constraints")
-def constraints(person: dict = Body(...)):
+def constraints(person: dict = Body(...),
+                x_orkestr_token: str = Header(default=None, alias="X-Orkestr-Token")):
     _require_field(person, "session_id")
-    _require_session(person["session_id"])
+    sid = person["session_id"]
+    s = _require_session(sid)
     _require_field(person, "id")
-    S.add_constraints(person["session_id"], person)
-    return {"ok": True}
+    member_id = person["id"]
+    minted = None
+    if sid != "ORK-001":
+        # Join-time identity bind: the FIRST submission for a slot mints that
+        # member's token (returned once, kept in the guest's browser — join stays
+        # one tap, no account). A later submission for an already-claimed slot
+        # must present the member token (or the host token) -> else 403, so no
+        # one can overwrite another member's constraints.
+        claimed = member_id in (( _room_auth(s).get("members")) or {})
+        if claimed:
+            _require_actor(s, sid, x_orkestr_token, member_id)
+        else:
+            minted, _ = S.mint_member_token(sid, member_id)
+    S.add_constraints(sid, person)
+    out = {"ok": True}
+    if minted:
+        out["member_token"] = minted
+    return out
 
 
 # ---- Group memory: a returning member's stored constraints (pre-fill form) ----
@@ -753,12 +863,15 @@ def status(sid: str):
 
 
 @app.post("/api/session/{sid}/draft")
-def session_draft(sid: str):
+def session_draft(sid: str,
+                  x_orkestr_token: str = Header(default=None, alias="X-Orkestr-Token")):
     """P2.2 — presenter starts a QUORUM DRAFT once enough friends have replied,
     instead of waiting for everyone. Explicit trigger only (GETs never compute).
-    400 if not a live session; 409 if quorum isn't reached yet. Idempotent for the
-    same reply set. Runs under the P0 per-session compute lock."""
-    _require_session(sid)
+    HOST-ONLY (participants cannot trigger presenter actions). 400 if not a live
+    session; 409 if quorum isn't reached yet. Idempotent for the same reply set.
+    Runs under the P0 per-session compute lock."""
+    s0 = _require_session(sid)
+    _require_host(s0, sid, x_orkestr_token)
     s = S.draft_plan(sid)
     return {"ok": True, "phase": s.get("phase"),
             "plan_basis": s.get("plan_basis"),
@@ -767,38 +880,54 @@ def session_draft(sid: str):
 
 
 @app.get("/api/session/{sid}/public")
-def session_public(sid: str):
-    """Read-only public snapshot of a room — safe for any device to poll.
+def session_public(sid: str,
+                   x_orkestr_token: str = Header(default=None, alias="X-Orkestr-Token")):
+    """Read-only snapshot of a room — safe for any device to poll.
 
     Powers cross-device sync for the presenter command center and the mobile
     participant views (who has joined / submitted, readiness, phase). This NEVER
     runs the planning/booking pipeline (no compute_plan), so polling it can never
-    trigger a real x402 payment. Exposes only public demo state: member ids,
-    display names, avatars, each member's own stated demo preferences, readiness,
-    phase, and a public payment_mode *label* if a plan already exists. No private
-    keys, no vault tokens, no secrets of any kind are returned.
+    trigger a real x402 payment.
+
+    PII rule (Stage C): an unauthenticated caller gets only what a viewer needs —
+    names/avatars, submitted/ready flags, plan/venue/status. Members' budgets,
+    dietary constraints, and freeform notes are NEVER returned to strangers:
+      * host token   -> full constraint detail for every member
+      * member token -> that member's own constraint detail only
+      * no/invalid token -> no constraint detail at all
+    (ORK-001 is the seeded sandbox with fictional personas — full demo detail.)
+    No private keys, no vault tokens, no room tokens are ever returned.
     """
     s = _require_session(sid)
     ready = list(s.get("ready", []))
+    # Who is asking? Decides how much constraint detail each member row carries.
+    viewer_is_host = sid == "ORK-001" or _is_host(s, x_orkestr_token)
+    auth_members = (_room_auth(s).get("members") or {})
+    viewer_member_id = None
+    if not viewer_is_host and x_orkestr_token:
+        for mid_, tok in auth_members.items():
+            if hmac.compare_digest(str(x_orkestr_token), str(tok)):
+                viewer_member_id = mid_
+                break
     members_out = []
     for m in s.get("members", []):
         c = m.get("constraints") or {}
         submitted = bool(c)
         mid = m.get("id")
+        include_detail = submitted and (viewer_is_host or mid == viewer_member_id)
         members_out.append({
             "id": mid,
             "name": m.get("name"),
             "avatar": m.get("avatar"),
             "submitted": submitted,
             "ready": mid in ready,
-            # The member's own constraints are demo preferences they entered — not
-            # secrets. Summarised to the public-facing fields only.
+            # Budgets / dietary needs / notes are personal — token-gated (above).
             "constraints": {
                 "available_days": c.get("available_days", []),
                 "budget_max": c.get("budget_max"),
                 "dietary": c.get("dietary", []),
-            } if submitted else None,
-            "freeform": (m.get("freeform") or "") if submitted else "",
+            } if include_detail else None,
+            "freeform": (m.get("freeform") or "") if include_detail else "",
         })
 
     plan = s.get("plan") if isinstance(s.get("plan"), dict) else None
@@ -900,7 +1029,10 @@ def session_public(sid: str):
 # returns it. Refuses ORK-001 (400, frozen); unknown session -> 404; falls back
 # to data/venues.json if the API key is absent/invalid so it never 500s on that.
 @app.post("/api/session/plan/{sid}")
-def session_plan(sid: str):
+def session_plan(sid: str,
+                 x_orkestr_token: str = Header(default=None, alias="X-Orkestr-Token")):
+    s = _require_session(sid)
+    _require_host(s, sid, x_orkestr_token)  # presenter-only compute trigger
     return S.generate_real_plan(sid)
 
 
@@ -925,12 +1057,14 @@ def negotiation(sid: str):
 
 
 @app.post("/api/approve/{sid}")
-def approve(sid: str, body: dict = Body(...)):
+def approve(sid: str, body: dict = Body(...),
+            x_orkestr_token: str = Header(default=None, alias="X-Orkestr-Token")):
     s = _require_session(sid)
     _require_field(body, "person_id")
     member_ids = {m["id"] for m in (s["members"] or _load("personas.json"))}
     if body["person_id"] not in member_ids:
         raise HTTPException(status_code=400, detail="unknown person_id")
+    _require_actor(s, sid, x_orkestr_token, body["person_id"])
     S.approve_plan(sid, body["person_id"])
     return {"ok": True}
 
@@ -953,7 +1087,8 @@ def expenses(sid: str):
 
 
 @app.post("/api/expense/{sid}")
-def expense(sid: str, body: dict = Body(...)):
+def expense(sid: str, body: dict = Body(...),
+            x_orkestr_token: str = Header(default=None, alias="X-Orkestr-Token")):
     s = _require_session(sid)
     _require_field(body, "paid_by")
     _require_field(body, "amount")
@@ -964,6 +1099,8 @@ def expense(sid: str, body: dict = Body(...)):
     member_ids = {m["id"] for m in (s["members"] or _load("personas.json"))}
     if body["paid_by"] not in member_ids:
         raise HTTPException(status_code=400, detail="paid_by is not a current member")
+    # You can only log an expense as YOURSELF (or as the host running the room).
+    _require_actor(s, sid, x_orkestr_token, body["paid_by"])
     S.add_expense(sid, body)
     return {"ok": True}
 
@@ -978,7 +1115,8 @@ def settlement(sid: str):
 
 
 @app.post("/api/settle/{sid}")
-def settle_ep(sid: str, body: dict = Body(default={})):
+def settle_ep(sid: str, body: dict = Body(default={}),
+              x_orkestr_token: str = Header(default=None, alias="X-Orkestr-Token")):
     s = _require_session(sid)
     has_fronted = "fronted" in body
     has_person_id = "person_id" in body
@@ -997,11 +1135,17 @@ def settle_ep(sid: str, body: dict = Body(default={})):
             raise HTTPException(status_code=400, detail="fronted values must be numeric >= 0")
     if has_person_id and body["person_id"] not in member_ids:
         raise HTTPException(status_code=400, detail="unknown person_id")
+    # Auth: overriding the group's fronted map is a host action; marking a
+    # transfer paid requires being THAT member (or the host).
+    if has_fronted:
+        _require_host(s, sid, x_orkestr_token)
+    if has_person_id:
+        _require_actor(s, sid, x_orkestr_token, body["person_id"])
     # All validation passed — apply changes
     if has_fronted:
         S.set_fronted(sid, body["fronted"])        # S11 confirm fronted
     if has_person_id:
-        S.approve_transfer(sid, body["person_id"]) # S13 approve transfer
+        S.mark_transfer_paid(sid, body["person_id"])  # S13 mark transfer as paid
     return {"ok": True}
 
 
@@ -1025,12 +1169,15 @@ def split(sid: str, mode: str = "itemized"):
 
 
 @app.post("/api/split/{sid}/orders")
-def split_orders(sid: str, body: dict = Body(default={}), mode: str = "itemized"):
+def split_orders(sid: str, body: dict = Body(default={}), mode: str = "itemized",
+                 x_orkestr_token: str = Header(default=None, alias="X-Orkestr-Token")):
     """Replace THIS session's orders (presenter edit / captured order) and return the
-    recomputed split. Body: {"items": [{id,name,price,quantity,assigned_to,shared_by,
-    category}]}. Item members are validated against the room; the split then reports
+    recomputed split. HOST-ONLY (rewrites the whole group's order set). Body:
+    {"items": [{id,name,price,quantity,assigned_to,shared_by,category}]}. Item
+    members are validated against the room; the split then reports
     split_source="backend_live_orders". Pure math — never triggers a payment."""
-    _require_session(sid)
+    s = _require_session(sid)
+    _require_host(s, sid, x_orkestr_token)
     if mode not in ("itemized", "equal"):
         raise HTTPException(status_code=400, detail="mode must be 'itemized' or 'equal'")
     items = body.get("items")

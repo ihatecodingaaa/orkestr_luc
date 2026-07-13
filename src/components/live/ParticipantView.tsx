@@ -69,7 +69,7 @@ export function ParticipantView({ roomId, memberId }: { roomId: string; memberId
   // phone shows the fresh receipt; otherwise it shows "not run yet".
   const [receipt, setReceipt] = useState<X402Receipt>(SAVED_RECEIPT);
 
-  const { data } = usePublicSession(roomId, { intervalMs: 2200 });
+  const { data } = usePublicSession(roomId, { intervalMs: 2200, viewerId: memberId });
   const startedRef = useRef(false);
 
   useEffect(() => {
@@ -171,7 +171,7 @@ export function ParticipantView({ roomId, memberId }: { roomId: string; memberId
       <header className={s.phoneTop}>
         <Wordmark small />
         <StatusPill kind={stage === "final" ? "paid" : iAmReady ? "ready" : "live"}>
-          {stage === "final" ? "Booked & paid" : iAmReady ? "You're in" : "Live room"}
+          {stage === "final" ? "Plan ready" : iAmReady ? "You're in" : "Live room"}
         </StatusPill>
       </header>
 
@@ -185,7 +185,7 @@ export function ParticipantView({ roomId, memberId }: { roomId: string; memberId
       </div>
 
       <ol className={s.phoneSteps} aria-label="Your progress">
-        {["Your picks", "Wait with friends", "Agents plan", "Booked & paid"].map((label, i) => {
+        {["Your picks", "Wait with friends", "Agents plan", "Plan & split"].map((label, i) => {
           const idx = stage === "form" ? 0 : stage === "waiting" ? 1 : stage === "working" ? 2 : 3;
           const cls = i < idx ? s.stepDone : i === idx ? s.stepNow : "";
           return (

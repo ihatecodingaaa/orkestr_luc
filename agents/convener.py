@@ -34,7 +34,6 @@ import sys
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from agents import venue as venue_agent
 from agents.persona import stance
 from payments.mandate import cosign
 
@@ -99,7 +98,7 @@ _VENUE_META = {
 
 
 def _seeded_plan(personas=None) -> dict:
-    return {
+    plan = {
         "plan_id": "PLAN-1",
         "title": "Korean BBQ + arcade",
         "day": "FRI",
@@ -120,16 +119,20 @@ def _seeded_plan(personas=None) -> dict:
         "per_person": 48,
         "booking_ref": "SG-2026-0627-77",
         "mandate_status": "co-signed",
-        "satisfies": [p.get("id", "UNKNOWN") for p in personas if isinstance(p, dict)] if personas else [],
+        "satisfies": [],
         "conflicts": [],
     }
+    # Honest even in the scripted fallback: satisfies/conflicts come from REAL
+    # per-member stance evaluation — never a stamped everyone-is-happy list.
+    evaluations = [stance(p, plan) for p in (personas or []) if isinstance(p, dict)]
+    return _annotate_plan(plan, evaluations)
 
 
 def _seeded_messages() -> list:
     return [
         {"round": 1, "agent": "P-001", "stance": "propose", "claim": "Sushi Hiro on Saturday?", "targets_plan": "PLAN-3", "constraint_ref": None},
         {"round": 1, "agent": "P-003", "stance": "object", "claim": "Carol can't do Saturday - Friday only", "targets_plan": "PLAN-3", "constraint_ref": "available_days"},
-        {"round": 1, "agent": "P-002", "stance": "object", "claim": "$70/head blows Bob's $40 cap", "targets_plan": "PLAN-3", "constraint_ref": "budget_max"},
+        {"round": 1, "agent": "P-002", "stance": "object", "claim": "Bob can't do Saturday - and sushi means raw fish anyway", "targets_plan": "PLAN-3", "constraint_ref": "available_days"},
         {"round": 2, "agent": "P-001", "stance": "propose", "claim": "Friday then - Veggie Table?", "targets_plan": "PLAN-2", "constraint_ref": None},
         {"round": 2, "agent": "P-004", "stance": "object", "claim": "Dave wants real meat, not all-veg", "targets_plan": "PLAN-2", "constraint_ref": "dietary"},
         {"round": 3, "agent": "P-001", "stance": "propose", "claim": "Seoul Garden - halal, veg sides, meat, arcade next door", "targets_plan": "PLAN-1", "constraint_ref": None},
@@ -546,7 +549,55 @@ def _booking_basics(plan: dict) -> dict:
     }
 
 
-def _fallback_strike_booking(plan: dict, error=None) -> dict:
+def _classify_booking_failure(stage: str, exc: Exception) -> str:
+    """A SPECIFIC, user-safe fail_reason for a booking that did not happen."""
+    if isinstance(exc, TimeoutError):
+        return "Booking timed out — the venue's booking service did not respond."
+    if stage == "payment":
+        return "Payment failed — the group's payment could not be authorized. No charge was made."
+    return "Venue booking service error — the reservation request could not be completed."
+
+
+def _failed_strike_booking(plan: dict, stage: str, exc: Exception) -> dict:
+    """EXPLICIT booking failure — the honest replacement for the old silent
+    success fallback that fabricated a co-signed mandate + booking_ref +
+    order.status "confirmed" for a booking that never happened.
+
+    Never synthesizes a booking_ref, a co-signed status, or a confirmed order.
+    The caller (core.session.compute_plan) routes this to phase="failed" so the
+    UI shows the real failure card, not a fake confirmation.
+    """
+    basics = _booking_basics(plan)
+    return {
+        "booking_failed": True,
+        "fail_reason": _classify_booking_failure(stage, exc),
+        "error_type": exc.__class__.__name__,
+        "request": {
+            "party_size": basics["party_size"],
+            "day": basics["day"],
+            "time": basics["request_time"],
+            "request_time": basics["request_time"],
+            "budget_total": basics["total_amount"],
+            "needs": basics["needs"],
+        },
+        "response": None,
+        "mandate": {
+            "status": "failed",
+            "merchant": basics["venue"].get("name", "Unknown Venue"),
+            "booking_ref": None,
+            "order": None,
+            "payment_mode": None,
+        },
+    }
+
+
+def seeded_demo_booking(plan: dict) -> dict:
+    """ORK-001 ONLY: the scripted demo handshake for the frozen seeded session.
+
+    The seeded demo is an explicitly-labelled scripted contract (the UI labels it
+    demo data) — it is NOT a claim that a real reservation exists. Never used for
+    live rooms; core.session.seed_demo is the only caller.
+    """
     basics = _booking_basics(plan)
     request = {
         "party_size": basics["party_size"],
@@ -556,31 +607,29 @@ def _fallback_strike_booking(plan: dict, error=None) -> dict:
         "budget_total": basics["total_amount"],
         "needs": basics["needs"],
     }
-    response = venue_agent.check_availability(request)
-    counter_time = response.get("time_offered") or basics["plan_time"]
     response = {
-        **response,
-        "counter_time": counter_time,
-        "per_head": response.get("per_head") or basics["per_person"],
-        "price_total": response.get("price_total") or basics["total_amount"],
+        "available": True,
+        "counter_time": basics["plan_time"],
+        "time_offered": basics["plan_time"],
+        "per_head": basics["per_person"],
+        "price_total": basics["total_amount"],
     }
     cart = {
         "cart_id": "CART-1",
         "items": [{
-            "desc": f"{basics['title']} - table of {basics['party_size']} - {basics['day']} {counter_time}",
-            "amount": response.get("price_total", basics["total_amount"]),
+            "desc": f"{basics['title']} - table of {basics['party_size']} - {basics['day']} {basics['plan_time']}",
+            "amount": basics["total_amount"],
         }],
         "booking_ref": basics["booking_ref"],
     }
     mandate = {
         **cosign(cart, basics["venue"].get("name", "Unknown Venue")),
-        "acp_status": "fallback",
-        "vault_token": {"id": "vt_mock_fallback", "mode": "mock"},
-        "order": {"booking_ref": basics["booking_ref"], "status": "confirmed"},
+        "acp_status": "seeded_demo",
+        "vault_token": {"id": "vt_demo_seed", "mode": "mock"},
+        "order": {"booking_ref": basics["booking_ref"], "status": "demo_seeded",
+                  "simulated": True},
         "payment_mode": "mock",
     }
-    if error:
-        mandate["acp_error"] = error.__class__.__name__
     return {"request": request, "response": response, "mandate": mandate}
 
 
@@ -633,6 +682,9 @@ def strike_booking(plan: dict, allow_x402: bool = False) -> dict:
     affected.
     """
     basics = _booking_basics(plan)
+    # Failure-stage tracker so an exception maps to a SPECIFIC honest fail_reason
+    # (venue API error vs payment declined vs timeout) — never a fake success.
+    stage = "venue"
     try:
         from datetime import datetime, timedelta, timezone
 
@@ -675,6 +727,7 @@ def strike_booking(plan: dict, allow_x402: bool = False) -> dict:
             "expires_at": expires_at,
         }
         # ---- payment point: faithful x402 (live only) or ACP Stripe/mock ----
+        stage = "payment"
         decision = {"action": "fallback", "mode": None}
         if allow_x402:
             from payments import x402_protocol as XP
@@ -723,6 +776,7 @@ def strike_booking(plan: dict, allow_x402: bool = False) -> dict:
                 "booking_ref": basics["booking_ref"],
             }
 
+        stage = "venue"
         completed = acp_checkout.complete_session(session["id"], payment_data=payment_data)
         order = completed.get("order", {})
         counter_time = session.get("counter_time") or basics["plan_time"]
@@ -770,7 +824,9 @@ def strike_booking(plan: dict, allow_x402: bool = False) -> dict:
             mandate["x402"] = x402_mandate
         return {"request": request, "response": response, "mandate": mandate}
     except Exception as exc:
-        return _fallback_strike_booking(plan, error=exc)
+        # HONESTY RULE: an exception means the booking DID NOT HAPPEN. Return an
+        # explicit failure — never a fabricated "co-signed"/"confirmed" mandate.
+        return _failed_strike_booking(plan, stage, exc)
 
 
 if __name__ == "__main__":
