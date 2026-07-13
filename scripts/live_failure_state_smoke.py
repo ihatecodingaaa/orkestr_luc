@@ -52,12 +52,14 @@ live = client.post("/api/session/live", json={}).json()
 sid = live["session_id"]
 members = live["members"]
 for m in members:
-    client.post("/api/constraints", json={
+    r = client.post("/api/constraints", json={
         "session_id": sid, "id": m["id"], "name": m["name"],
         "constraints": {"available_days": ["FRI"], "budget_max": 60, "dietary": []},
         "freeform": "",
-    })
-    client.post(f"/api/ready/{sid}", json={"person_id": m["id"]})
+    }).json()
+    # Stage C: the first submit mints the member token; ready requires it.
+    client.post(f"/api/ready/{sid}", json={"person_id": m["id"]},
+                headers={"X-Orkestr-Token": r.get("member_token") or ""})
 
 # 2. Status is the compute gate -> strict + nothing grounded -> failed.
 st = client.get(f"/api/status/{sid}").json()

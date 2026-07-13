@@ -9,6 +9,7 @@ import { FinalPlanCard } from "./FinalPlanCard";
 import { PaymentProofCard } from "./PaymentProofCard";
 import { FreshProofPanel } from "./FreshProofPanel";
 import { SmartSplitCard } from "./SmartSplitCard";
+import { SettlementCard } from "./SettlementCard";
 import { TrustPanel } from "./TrustPanel";
 import { MerchantAdapterCard } from "./MerchantAdapterCard";
 import { LiveReadinessPanel } from "./LiveReadinessPanel";
@@ -43,8 +44,10 @@ import {
   markReady,
   paymentMode,
   readLiveState,
+  roomToken,
   shortHash,
   startDraft,
+  storeHostToken,
   submitConstraints,
   toReceipt,
   updateDraft,
@@ -735,15 +738,20 @@ export function GroupRoom({
     setCloning(true);
     setCloneError(null);
     try {
+      const token = roomToken(sessionId);
       const res = await fetch(`${API_BASE}/api/session/clone/${sessionId}`, {
         method: "POST",
         cache: "no-store",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { "X-Orkestr-Token": token } : {}), // clone is host-only
+        },
         body: "{}",
       });
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-      const data = (await res.json()) as { session_id?: string };
+      const data = (await res.json()) as { session_id?: string; host_token?: string };
       if (!data.session_id) throw new Error("clone returned no session_id");
+      if (data.host_token) storeHostToken(data.session_id, data.host_token);
       // Full navigation to the fresh cloned room — no manual state reset needed.
       window.location.href = presenterLink(data.session_id);
     } catch (e) {
@@ -922,9 +930,10 @@ export function GroupRoom({
   // Single source of truth for the status pill, driven by readiness + phase:
   //   0/5–4/5      → "Waiting for friends"
   //   5/5, no plan → "Agents working"
-  //   plan + proof → "Booked · proof ready"
+  //   plan + proof → "Plan ready · handoff" (never "Booked" — no real reservation
+  //   is held; the booking is a Maps/site/call handoff)
   const phase = useMemo<{ label: string; kind: PillKind }>(() => {
-    if (stage === "final") return { label: "Booked · proof ready", kind: "paid" };
+    if (stage === "final") return { label: "Plan ready · handoff", kind: "paid" };
     if (stage === "working" || allSubmitted) return { label: "Agents working", kind: "active" };
     return { label: "Waiting for friends", kind: "warning" };
   }, [stage, allSubmitted]);
@@ -1173,6 +1182,15 @@ export function GroupRoom({
                     source={splitSource}
                     showFallbackNote={splitFellBack}
                   />
+                  {/* Friend legs are tracked state, never on-chain — honest
+                      "who pays who back" with Mark-as-paid, no fabricated hashes. */}
+                  {sessionId && !localRoom ? (
+                    <SettlementCard
+                      sessionId={sessionId}
+                      settlement={state?.settlement}
+                      members={roomMembers}
+                    />
+                  ) : null}
                   {/* Share the group-mandate receipt card (native share / WhatsApp /
                       copy-link live inside that page). Same-origin via the API rewrite. */}
                   {sessionId ? (

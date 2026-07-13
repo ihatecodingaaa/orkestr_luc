@@ -19,18 +19,19 @@ def _load():
 
 
 def check_availability(request: dict) -> dict:
-    """Match request['needs'] against venue attributes and quote terms.
+    """SANDBOX ONLY — no real availability system is queried.
 
-    TODO Phase 2: real matching over _load(). For now: seeded response
-    (7pm is full -> the venue counters 7:30).
+    Returns a SUGGESTED time so the demo flow has a coherent shape; it is not a
+    held slot and must never be presented as a real reservation. Live rooms use
+    the Merchant Adapter handoff (Maps/website/phone) to actually reserve.
     """
     return {
-        "available": True,
-        "time_offered": "19:30",
+        "available": None,  # unknown — the sandbox does not check real inventory
+        "time_offered": "19:30",  # suggested time, not a held reservation slot
+        "time_is_suggestion": True,
         "price_total": 240,
         "per_head": 48,
         "meets": ["halal", "vegetarian_option"],
-        "hold_id": "HOLD-77",
     }
 
 

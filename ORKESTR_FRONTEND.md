@@ -278,9 +278,9 @@ Each row: avatar + name + amount. Editable if something was missed.
   "shares":   { "P-001": 80, "P-002": 80, "P-003": 80, "P-004": 80, "P-005": 80 },
   "net":      { "P-001": 160, "P-002": 20, "P-003": -20, "P-004": -80, "P-005": -80 },
   "transfers": [
-    { "from": "P-004", "to": "P-001", "amount": 80, "rail": "x402", "status": "pending", "tx_hash": null, "latency_ms": 1100 },
-    { "from": "P-005", "to": "P-001", "amount": 80, "rail": "x402", "status": "pending", "tx_hash": null, "latency_ms": 1300 },
-    { "from": "P-003", "to": "P-002", "amount": 20, "rail": "x402", "status": "pending", "tx_hash": null, "latency_ms": 900 }
+    { "from": "P-004", "to": "P-001", "amount": 80, "status": "pending" },
+    { "from": "P-005", "to": "P-001", "amount": 80, "status": "pending" },
+    { "from": "P-003", "to": "P-002", "amount": 20, "status": "pending" }
   ],
   "net_after": { "P-001": 0, "P-002": 0, "P-003": 0, "P-004": 0, "P-005": 0 }
 }
@@ -290,7 +290,7 @@ Each row: avatar + name + amount. Editable if something was missed.
 - 3 transfer rows: "Dave owes Alice $80", "Eve owes Alice $80", "Carol owes Bob $20"
 - Each row: from-avatar → amount → to-avatar
 - Amounts in amber tabular-nums
-- "Approve your transfer" CTA (visible to payers only)
+- "Mark as paid" CTA (visible to payers only) — friends settle by their usual method (PayNow/Venmo/cash); Orkestr tracks it
 
 ---
 
@@ -301,25 +301,26 @@ Each row: avatar + name + amount. Editable if something was missed.
 **Displays:**
 - "You owe [name] $[amount]"
 - Amount large (Inter 600, 32px, tabular-nums)
-- Transfer detail: to whom, via x402
-- "Approve $80.00" primary button (coral)
+- Transfer detail: to whom — settled by your usual method (PayNow/Venmo/cash)
+- "Mark as paid" primary button (coral)
 
-**On approve:** `POST /api/settle/[id]` with `{ "person_id": "P-004" }`
+**On mark-as-paid:** `POST /api/settle/[id]` with `{ "person_id": "P-004" }` —
+sets `status: "marked_paid"` + `marked_by` + `marked_at` (no hash; friend legs are never on-chain)
 
-**Poll** `GET /api/status/[id]` — when all transfers `status === "settled"` → navigate to S14
+**Poll** `GET /api/status/[id]` — when all transfers `status === "marked_paid"` → navigate to S14
 
 ---
 
 ### S14 · Settled `/settle/[id]/done`
 
-**Fetch:** `GET /api/settlement/[id]` — use `net_after` (all zeros) and `transfers` (all `status: "settled"`)
+**Fetch:** `GET /api/settlement/[id]` — use `net_after` (all zeros) and `transfers` (all `status: "marked_paid"`)
 
 **Displays:**
 - Near-black card (`--color-settled-bg`)
 - Amber seal circle with ✓
 - "Everyone's square" (Plus Jakarta Sans, 700, white)
-- Tx hash + timestamp (Inter, 10px, muted)
-- Audit row: 3 transfers, each with amount + hash
+- "Marked paid by [name] · [time]" (Inter, 10px, muted) — no tx hashes; friend legs are never on-chain
+- Audit row: 3 transfers, each with amount + who marked it paid, when
 
 ---
 
@@ -375,19 +376,20 @@ export const mockSettlement = {
   shares:   { "P-001": 80, "P-002": 80, "P-003": 80, "P-004": 80, "P-005": 80 },
   net:      { "P-001": 160, "P-002": 20, "P-003": -20, "P-004": -80, "P-005": -80 },
   transfers: [
-    { from: "P-004", to: "P-001", amount: 80, rail: "x402", status: "pending", tx_hash: null, latency_ms: 1100 },
-    { from: "P-005", to: "P-001", amount: 80, rail: "x402", status: "pending", tx_hash: null, latency_ms: 1300 },
-    { from: "P-003", to: "P-002", amount: 20, rail: "x402", status: "pending", tx_hash: null, latency_ms: 900 }
+    { from: "P-004", to: "P-001", amount: 80, status: "pending" },
+    { from: "P-005", to: "P-001", amount: 80, status: "pending" },
+    { from: "P-003", to: "P-002", amount: 20, status: "pending" }
   ],
   net_after: { "P-001": 0, "P-002": 0, "P-003": 0, "P-004": 0, "P-005": 0 }
 }
 
+// Friend legs are never on-chain — "marked paid" is honest tracked state, not a settlement rail.
 export const mockSettled = {
   ...mockSettlement,
   transfers: [
-    { from: "P-004", to: "P-001", amount: 80, rail: "x402", status: "settled", tx_hash: "0x4a2f9c", latency_ms: 1100 },
-    { from: "P-005", to: "P-001", amount: 80, rail: "x402", status: "settled", tx_hash: "0x7b3e1d", latency_ms: 1300 },
-    { from: "P-003", to: "P-002", amount: 20, rail: "x402", status: "settled", tx_hash: "0x2c8f4a", latency_ms: 900 }
+    { from: "P-004", to: "P-001", amount: 80, status: "marked_paid", marked_by: "P-004", marked_at: "2026-06-27T19:42:00+08:00" },
+    { from: "P-005", to: "P-001", amount: 80, status: "marked_paid", marked_by: "P-005", marked_at: "2026-06-27T19:44:00+08:00" },
+    { from: "P-003", to: "P-002", amount: 20, status: "marked_paid", marked_by: "P-003", marked_at: "2026-06-27T19:45:00+08:00" }
   ]
 }
 ```
@@ -471,7 +473,7 @@ Renders S12 (See who owes what). Props: `transfers` array, `personas` array. Sho
 Shared between S6 and S13. Props: `amount`, `label`, `onApprove`, `loading`. Full-width coral button, 48px min-height. Shows spinner while `loading`. Disabled after tap to prevent double-submit.
 
 ### `SettledPassport`
-Renders S14. Props: `transfers` (all settled), `timestamp`. Near-black card, amber seal, tx hashes in Inter 10px muted.
+Renders S14. Props: `transfers` (all marked paid), `timestamp`. Near-black card, amber seal, "marked paid by · when" lines in Inter 10px muted — no tx hashes (friend legs are never on-chain).
 
 ---
 

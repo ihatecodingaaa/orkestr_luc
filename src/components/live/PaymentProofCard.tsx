@@ -178,6 +178,13 @@ export function PaymentProofCard({
       </div>
 
       <p className={s.proofNote}>{COPY.walletExplainer}</p>
+      {/* Never let this real receipt's credibility bleed onto the friend legs:
+          only the merchant payment is on-chain; friends settle off-app. */}
+      <p className={s.proofNote}>
+        Merchant payment — real testnet transaction ({receipt.amount} on {receipt.network}).
+        Friend settlements are tracked separately and settled by your usual method — they are
+        never on-chain.
+      </p>
       <span className={s.demoTag}>{tag}</span>
     </div>
   );

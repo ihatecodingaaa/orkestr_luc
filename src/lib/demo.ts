@@ -90,8 +90,11 @@ export const PERSONAS: Persona[] = [
     initial: "E",
     colorVar: "--friend-e",
     vibe: "Plant-based and close by",
-    wants: "Vegan option · not too far",
-    demo: { days: ["FRI", "SAT"], budget: "80", dietary: ["vegan"], freeform: "vegan-friendly and walkable" },
+    // Hard constraint is vegetarian (verifiable against venue tags); the vegan
+    // preference stays in freeform for the ranker. The old "vegan" hard need was
+    // only ever "satisfied" via a silent unknown-need pass — now fail-closed.
+    wants: "Vegetarian · not too far",
+    demo: { days: ["FRI", "SAT"], budget: "80", dietary: ["vegetarian"], freeform: "vegan-friendly and walkable" },
   },
 ];
 

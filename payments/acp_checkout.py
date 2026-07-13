@@ -82,10 +82,13 @@ def update_session(session_id, selected_fulfillment_options=None, **updates) -> 
         "party_size": party_size,
         "status": "offered",
     }
+    # Honest sandbox copy: this mock never checks real availability, so it must
+    # not invent scarcity ("X unavailable"). The time is a suggestion to confirm
+    # with the venue, not a held slot.
     message = {
         "type": "info",
-        "code": "time_adjusted",
-        "text": f"{request_time} unavailable - offering {counter_time}",
+        "code": "time_suggested",
+        "text": f"suggested time {counter_time} - confirm with the venue (sandbox: availability not checked)",
     }
     session.update(updates)
     session.update({
@@ -119,10 +122,14 @@ def complete_session(session_id, payment_data) -> dict:
             capture = {"status": "capture_skipped", "error": exc.__class__.__name__}
 
     booking_ref = payment_data.get("booking_ref") or "BK-" + session_id[-8:].upper()
+    # This is the SANDBOX merchant's simulated acceptance (no real restaurant
+    # inventory behind it) — marked simulated so no consumer can present it as a
+    # real reservation. The UI presents live bookings as a handoff, not "confirmed".
     order = {
         "id": "ord_" + uuid4().hex[:12],
         "booking_ref": booking_ref,
         "status": "confirmed",
+        "simulated": True,
         "capture": capture,
     }
     session.update({

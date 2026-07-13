@@ -22,7 +22,9 @@ export function AgentTimeline({
     prefs: "5 of 5 friends submitted",
     discovery: venue ? `Shortlisted ${venue}` : "Scanning venues that fit every diet",
     negotiate: agree ? `${agree} of 5 agents agree` : "Trading off day, budget, and diet",
-    booking: bookingRef ? `Table locked · ${bookingRef}` : "Confirming the table with the merchant",
+    booking: bookingRef
+      ? `Booking handoff prepared · ${bookingRef}`
+      : "Preparing the booking handoff (reserve via Maps or call)",
     payment: "0.001 USDC settled on Base Sepolia",
   };
 

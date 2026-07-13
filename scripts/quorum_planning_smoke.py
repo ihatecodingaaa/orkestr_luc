@@ -1,4 +1,4 @@
-"""Smoke for quorum planning (P2.2).
+﻿"""Smoke for quorum planning (P2.2).
 
 Asserts a live room can DRAFT a plan once enough friends reply, without waiting
 for everyone, and that this never regresses the pure-read / compute-gate rules:
@@ -47,17 +47,31 @@ def check(label, ok, detail=""):
     if ok:
         print(f"  [PASS] {label}")
     else:
-        print(f"  [FAIL] {label}" + (f" — {detail}" if detail else ""))
+        print(f"  [FAIL] {label}" + (f" â€” {detail}" if detail else ""))
         _failures.append(label)
 
 
+# Stage C auth: first constraints submit mints the member token; ready/draft
+# require it (or the host token). Tokens captured here like a real client would.
+TOKENS = {}  # (sid, member_id) -> member token
+HOSTS = {}   # sid -> host token
+
+
 def reply(sid, m):
-    client.post("/api/constraints", json={
+    r = client.post("/api/constraints", json={
         "session_id": sid, "id": m["id"], "name": m["name"],
         "constraints": {"available_days": ["FRI"], "budget_max": 60, "dietary": []},
         "freeform": "",
-    })
-    client.post(f"/api/ready/{sid}", json={"person_id": m["id"]})
+    }).json()
+    if r.get("member_token"):
+        TOKENS[(sid, m["id"])] = r["member_token"]
+    client.post(f"/api/ready/{sid}", json={"person_id": m["id"]},
+                headers={"X-Orkestr-Token": TOKENS.get((sid, m["id"]), "")})
+
+
+def draft(sid):
+    return client.post(f"/api/session/{sid}/draft",
+                       headers={"X-Orkestr-Token": HOSTS.get(sid, "")})
 
 
 def gets_are_not_ready(sid):
@@ -71,12 +85,13 @@ print("=" * 60)
 live = client.post("/api/session/live", json={}).json()
 sid = live["session_id"]
 members = live["members"]
+HOSTS[sid] = live.get("host_token") or ""
 
 # --- 0/5 replied -------------------------------------------------------------
 st = client.get(f"/api/status/{sid}").json()
 check("0/5: quorum_min == 3", st.get("quorum_min") == 3, str(st.get("quorum_min")))
 check("0/5: quorum_ready False", st.get("quorum_ready") is False, str(st.get("quorum_ready")))
-check("0/5: draft -> 409 (cannot compute)", client.post(f"/api/session/{sid}/draft").status_code == 409)
+check("0/5: draft -> 409 (cannot compute)", draft(sid).status_code == 409)
 check("0/5: pure-read GETs stay 409 (no compute)", gets_are_not_ready(sid))
 
 # --- 2/5 replied (below quorum) ---------------------------------------------
@@ -85,7 +100,7 @@ reply(sid, members[1])
 st = client.get(f"/api/status/{sid}").json()
 check("2/5: replied_count == 2", st.get("replied_count") == 2, str(st.get("replied_count")))
 check("2/5: quorum_ready False", st.get("quorum_ready") is False, str(st.get("quorum_ready")))
-check("2/5: draft -> 409 (below quorum)", client.post(f"/api/session/{sid}/draft").status_code == 409)
+check("2/5: draft -> 409 (below quorum)", draft(sid).status_code == 409)
 check("2/5: pure-read GETs stay 409 (no compute)", gets_are_not_ready(sid))
 check("2/5: no plan computed", client.get(f"/api/session/{sid}/public").json().get("plan") is None)
 
@@ -102,9 +117,9 @@ check("3/5: pure-read GETs STILL 409 before explicit draft", gets_are_not_ready(
 check("3/5: no plan before the explicit draft", client.get(f"/api/session/{sid}/public").json().get("plan") is None)
 
 # explicit host trigger
-draft = client.post(f"/api/session/{sid}/draft")
-db = draft.json()
-check("3/5: draft POST -> 200", draft.status_code == 200, str(draft.status_code))
+draft_resp = draft(sid)
+db = draft_resp.json()
+check("3/5: draft POST -> 200", draft_resp.status_code == 200, str(draft_resp.status_code))
 check("3/5: plan_basis == quorum_draft", db.get("plan_basis") == "quorum_draft", str(db.get("plan_basis")))
 check("3/5: draft_started_with == the 3 repliers", sorted(db.get("draft_started_with") or []) == replied3, str(db.get("draft_started_with")))
 plan = client.get(f"/api/plan/{sid}")
@@ -140,7 +155,7 @@ check("stale: plan still readable, unchanged satisfies (3)",
       sorted(client.get(f"/api/plan/{sid}").json().get("satisfies") or []) == replied3)
 
 # Re-draft folds in the 4th.
-rd = client.post(f"/api/session/{sid}/draft").json()
+rd = draft(sid).json()
 replied4 = sorted([members[i]["id"] for i in range(4)])
 check("re-draft: draft_started_with == 4", sorted(rd.get("draft_started_with") or []) == replied4,
       str(rd.get("draft_started_with")))
@@ -162,7 +177,7 @@ check("re-draft: no x402 receipt fired (public)",
 
 # 5th replies -> re-draft promotes to all_ready.
 reply(sid, members[4])
-rd2 = client.post(f"/api/session/{sid}/draft").json()
+rd2 = draft(sid).json()
 check("re-draft full: plan_basis == all_ready", rd2.get("plan_basis") == "all_ready", str(rd2.get("plan_basis")))
 check("re-draft full: draft_started_with == 5", len(rd2.get("draft_started_with") or []) == 5, str(rd2.get("draft_started_with")))
 check("re-draft full: pending empty", (rd2.get("pending_members") or []) == [], str(rd2.get("pending_members")))
@@ -172,7 +187,7 @@ check("re-draft full: not stale", rd2.get("draft_stale") is False, str(rd2.get("
 _t.sleep(0.2)
 before_spawns = _spawns["n"]
 plan_before = client.get(f"/api/plan/{sid}").json()
-rd3 = client.post(f"/api/session/{sid}/draft").json()
+rd3 = draft(sid).json()
 _t.sleep(0.2)
 check("re-draft no-op: plan_basis unchanged (all_ready)", rd3.get("plan_basis") == "all_ready", str(rd3.get("plan_basis")))
 check("re-draft no-op: no extra x402 spawn", _spawns["n"] == before_spawns, f"spawns={_spawns['n']}")

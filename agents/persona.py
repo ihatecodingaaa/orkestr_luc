@@ -21,14 +21,19 @@ def _plan_text(plan: dict) -> str:
 def _venue_supports(plan: dict, need: str) -> bool:
     venue = plan.get("venue") or {}
     tags = {str(tag).lower() for tag in venue.get("tags", [])}
-    if need == "vegetarian":
+    need_l = str(need).strip().lower()
+    if need_l == "vegetarian":
         return bool(venue.get("vegetarian")) or "vegetarian" in tags or "vegetarian_option" in tags
-    if need == "halal":
+    if need_l == "halal":
         return bool(venue.get("halal")) or "halal" in tags
-    if need == "no_raw_fish":
+    if need_l == "no_raw_fish":
         text = _plan_text(plan)
         return "raw" not in text and "sushi" not in text and "sashimi" not in text
-    return True
+    # Unrecognized need: FAIL CLOSED. It counts as supported ONLY when the venue
+    # explicitly carries it as a tag — never a silent pass. (The old `return True`
+    # here marked e.g. a "vegan" member satisfied at any venue: a fabricated
+    # "N/5 happy". If the system can't establish the need is met, it isn't.)
+    return need_l in tags
 
 
 def _dietary_objection(persona: dict, plan: dict):

@@ -61,7 +61,9 @@ REAL_STATUSES = ("verified", "source_only")
 _BADGES = {
     "verified": "Google Places verified",
     "source_only": "Web source found",
-    "demo": "Sample demo venue",
+    # Accurate hero-room label: seeded sample data, clearly NOT a verified live
+    # venue — the pitch's "Google Places verified" applies to live rooms only.
+    "demo": "Seeded demo venue · sample data",
     "unverified": "Unverified",
 }
 

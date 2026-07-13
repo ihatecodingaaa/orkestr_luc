@@ -83,7 +83,7 @@ if [ "${HTTP_CODE}" = "200" ] && [ "${PAYMENT_MODE}" = "live" ] && [ -n "${REAL_
 fi
 
 echo "NOTE: this was NOT a fresh live proof (payment_mode=${PAYMENT_MODE:-<none>})."
-echo "  - 'mock'  => the run timed out/errored and fell back to the mock stamp."
+echo "  - 'mock'  => the run timed out/errored; honest hash-free mock body (txHash null)."
 echo "  - 403/404 => gate rejected (check DEMO_SECRET and ENABLE_X402_DEMO_RECEIPT)."
 echo "  - 429     => cooldown active; wait and retry."
 echo "  - 502     => live payment did not settle; check server logs / wallet funding."

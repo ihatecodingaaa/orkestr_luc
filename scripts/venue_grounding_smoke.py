@@ -96,7 +96,8 @@ demo_plan = {"venue": {"id": "seoul_garden", "name": "Seoul Garden"}}
 VG.attach_grounding(demo_plan, VG.build_grounding_index(seed_venues=seed))
 dv = demo_plan["venue"]["verification"]
 check("seed venue graded demo", dv["verification_status"] == "demo", dv["verification_status"])
-check("demo badge says 'Sample demo venue'", dv["badge"] == "Sample demo venue", dv["badge"])
+check("demo badge says 'Seeded demo venue · sample data'",
+      dv["badge"] == "Seeded demo venue · sample data", dv["badge"])
 check("demo does NOT count as real", not VG.counts_as_real(demo_plan["venue"]))
 check("demo allowed (relaxed) as labeled sample", VG.may_present_as_venue(demo_plan["venue"], strict=False))
 check("demo fails closed (strict)", VG.check_final_venue(demo_plan, strict=True)["fail_closed"])

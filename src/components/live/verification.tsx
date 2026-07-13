@@ -4,7 +4,9 @@ import s from "./live.module.css";
 const LABEL: Record<VerificationStatus, string> = {
   verified: "Google Places verified",
   source_only: "Web source found",
-  demo: "Sample demo venue",
+  // Matches the backend badge (agents/venue_grounding.py): the seeded hero room
+  // shows honest sample-data labelling, never implying a verified live venue.
+  demo: "Seeded demo venue · sample data",
   unverified: "Unverified",
 };
 

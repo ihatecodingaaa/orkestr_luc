@@ -97,20 +97,24 @@ agent moving funds.
 
 ---
 
-## 5. Agent-to-agent handshake (the counter-offer)
+## 5. Agent-to-agent handshake (sandbox ACP flow)
 
-Your buyer agent asks for 7:00; the venue's agent counters 7:30; both co-sign. The
-full `request → response → mandate` is exposed for the `/confirmed` screen.
+The buyer agent opens an ACP checkout with the sandbox merchant, a time is
+SUGGESTED (the sandbox never checks real availability and never claims a held
+slot), and both sides co-sign the mandate. The full `request → response →
+mandate` is exposed for the `/confirmed` screen; live rooms present the result
+as a **booking handoff** (reserve via Maps/site/call), never a confirmed
+reservation.
 
 ```python
-# ai/narrate.py — the two agents talking
-"Your agent asks: table for 5 on FRI at 19:00."
-"Seoul Garden's agent counters: 19:00 is full, 19:30 is open."
-"Both agents co-sign - booking SG-2026-0627-77 is locked in."
+# payments/acp_checkout.py — honest sandbox message
+{"code": "time_suggested",
+ "text": "suggested time 19:30 - confirm with the venue (sandbox: availability not checked)"}
 ```
 
-**Why it matters:** *"the future isn't you transacting with a person — it's your
-agent transacting with theirs."* This is the headline demo beat.
+**Why it matters:** it demonstrates the agent-commerce rail truthfully — a real
+protocol shape, clearly labelled simulation, no invented scarcity or fake
+confirmations.
 
 ---
 
@@ -168,21 +172,23 @@ PHASES = ["negotiating", "plan_ready", "booking", "confirmed"]
 
 ---
 
-## 9. x402 settlement rail
+## 9. Honest friend-to-friend settlement
 
-Each simplified transfer is settled on a stablecoin-style rail, stamped with a tx
-hash and latency.
+Friends never connect wallets, so friend legs are NEVER on-chain. Each simplified
+transfer is plain tracked state — no fabricated tx hash, no invented latency:
 
 ```python
-# payments/x402.py
-def settle(transfers):
-    return [{**t, "rail": "x402", "status": "settled",
-             "tx_hash": stamp(), "latency_ms": random.randint(800, 1500)}
-            for t in transfers]
+# core/session.py — recompute_settlement
+transfers = [{**t, "amount": _money(t["amount"]), "status": "pending"}
+             for t in simplify(net_cents)]
+# marked paid via POST /api/settle {person_id} -> status "marked_paid"
+# + marked_by + marked_at (who tapped "Mark as paid", and when)
 ```
 
-**Why it matters:** the debt clears autonomously on an irreversible rail — Splitwise
-only tracks IOUs; Orkestr actually moves the money.
+**Why it matters:** nothing displayed asserts a fact the system didn't establish.
+Friends settle by their usual method (PayNow/Venmo/cash) and Orkestr tracks it.
+The ONLY on-chain transaction in the product is the merchant's real x402 testnet
+receipt (0.001 USDC on Base Sepolia), which carries a genuine hash + Basescan link.
 
 ---
 
