@@ -15,6 +15,7 @@ import secrets
 import threading
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException
 
@@ -32,7 +33,43 @@ PHASES = ["negotiating", "plan_ready", "booking", "confirmed"]
 # minimum to DRAFT; the all-ready path is unchanged.
 QUORUM_MIN = 3
 
+# Public-readiness limits (Stage P1). Env-tunable; sane defaults protect the owner's
+# API spend and PII footprint without touching the sub-30-second guest join flow.
+MAX_MEMBERS_PER_ROOM = int(os.environ.get("MAX_MEMBERS_PER_ROOM", "12"))
+MAX_NOTE_LEN = int(os.environ.get("MAX_CONSTRAINT_NOTE_LEN", "500"))
+
+# Honest capacity state — shown when the day's Google Places spend cap is hit in a
+# room that REQUIRES a live search. Never disguised as "no verified restaurant".
+CAPACITY_LIMITED_MESSAGE = (
+    "Orkestr is at capacity right now — we've hit today's venue-search limit. "
+    "Please try again in a bit."
+)
+
 LOGGER = logging.getLogger(__name__)
+
+
+def _now_iso():
+    """Current UTC time as an ISO-8601 string (session created/active stamps)."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_iso(v):
+    """Parse an ISO stamp to an aware datetime, or None if absent/invalid."""
+    if not isinstance(v, str) or not v:
+        return None
+    try:
+        dt = datetime.fromisoformat(v)
+    except ValueError:
+        return None
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+
+
+def _room_ttl_days():
+    raw = os.environ.get("ROOM_TTL_DAYS", "14").strip()
+    try:
+        return int(raw)
+    except ValueError:
+        return 14
 
 # Per-session compute locks. compute_plan runs the negotiation/booking pipeline
 # and spawns the x402 receipt daemon; without a lock two devices/tabs hitting the
@@ -82,6 +119,78 @@ def delete_session(sid):
     db.delete_session(sid)
 
 
+# ---------------------------------------------------------------------------
+# Session lifecycle (Stage P1c). Public rooms hold real people's names + dietary
+# info; they must not live forever. Rooms expire ROOM_TTL_DAYS after last activity:
+# their PII is scrubbed to a tiny tombstone (so the link shows an honest "expired"
+# page instead of a 500), and the in-memory cache entry is evicted (fixing the
+# never-evicting-cache criticism for expired rooms). ORK-001 is exempt.
+# ---------------------------------------------------------------------------
+
+def _scrub_to_tombstone(sid, s, now):
+    """Replace a room's data with a PII-free tombstone (name/constraints/notes/
+    negotiation/plan all gone), keeping only anonymous lifecycle facts."""
+    tomb = {
+        "session_id": sid,
+        "expired": True,
+        "created_at": s.get("created_at") if isinstance(s, dict) else None,
+        "expired_at": now.isoformat(),
+    }
+    db.set_session(sid, tomb)  # overwrites the SQLite blob + refreshes the cache
+
+
+def cleanup_expired_rooms(ttl_days=None, now=None):
+    """Scrub rooms inactive for longer than the TTL. Returns the number expired.
+    ORK-001 and already-tombstoned rooms are skipped. Legacy rows with no timestamp
+    are grandfathered in (stamped now) so they age forward, never deleted blindly."""
+    ttl_days = _room_ttl_days() if ttl_days is None else ttl_days
+    if ttl_days <= 0:
+        return 0
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=ttl_days)
+    expired = 0
+    for sid in db.list_sessions():
+        if sid == "ORK-001":
+            continue
+        s = db.get_session(sid)
+        if not isinstance(s, dict) or s.get("expired"):
+            continue
+        ts = _parse_iso(s.get("last_active_at") or s.get("created_at"))
+        if ts is None:
+            s["last_active_at"] = now.isoformat()
+            db.set_session(sid, s)  # grandfather legacy rows, then age from now
+            continue
+        if ts < cutoff:
+            _scrub_to_tombstone(sid, s, now)
+            expired += 1
+    if expired:
+        LOGGER.info("cleanup: expired %d room(s) past %d-day TTL", expired, ttl_days)
+    return expired
+
+
+_CLEANUP_STARTED = False
+
+
+def start_cleanup_timer():
+    """Start a single daemon thread that periodically scrubs expired rooms. Safe to
+    call once at startup (single-worker design); no-ops on a second call."""
+    global _CLEANUP_STARTED
+    if _CLEANUP_STARTED:
+        return
+    _CLEANUP_STARTED = True
+    interval = int(os.environ.get("ROOM_CLEANUP_INTERVAL_SECONDS", "3600"))
+
+    def _loop():
+        while True:
+            time.sleep(max(60, interval))
+            try:
+                cleanup_expired_rooms()
+            except Exception as e:  # noqa: BLE001
+                LOGGER.warning("cleanup loop error: %s", e)
+
+    threading.Thread(target=_loop, daemon=True).start()
+
+
 def _members(s):
     return s["members"] or _load("personas.json")
 
@@ -92,6 +201,7 @@ def new_session(name=None, date_range=None):
     # — unenumerable. ORK-001 (the seeded demo) is the only short id and is
     # special-cased everywhere.
     sid = "ORK-" + secrets.token_urlsafe(16)
+    now = _now_iso()
     s = {
         "session_id": sid,
         "name": name or "Friday plan",
@@ -104,6 +214,10 @@ def new_session(name=None, date_range=None):
         "approvals": [],
         "expenses": [],
         "settlement": None,
+        # Data lifecycle (P1c): rooms expire ROOM_TTL_DAYS after last activity so
+        # real people's names/constraints aren't retained indefinitely. Additive.
+        "created_at": now,
+        "last_active_at": now,
         # Server-side room auth (NEVER returned by any read endpoint):
         #   host    — presenter token, returned ONCE to the room creator
         #   members — member_id -> token, minted when a guest claims their slot
@@ -204,6 +318,7 @@ def mark_ready(sid, person_id):
         raise HTTPException(status_code=400, detail="unknown person_id")
     if person_id not in s.setdefault("ready", []):
         s["ready"].append(person_id)
+    s["last_active_at"] = _now_iso()  # keep the room alive (P1c TTL)
     db.set_session(sid, s)  # write-through AFTER mutation
     return s
 
@@ -285,6 +400,15 @@ def add_constraints(sid, person):
     member_id = person.get("id")
     if not member_id:
         raise HTTPException(status_code=400, detail="id required")
+    # Protect LLM token spend (P1b): bound the freeform note at ingestion, not just
+    # at the ranker. A public stranger can't inflate prompt size with a huge note.
+    note = person.get("freeform")
+    if isinstance(note, str) and len(note) > MAX_NOTE_LEN:
+        person["freeform"] = note[:MAX_NOTE_LEN]
+    # Cap members per room (P1b): a genuinely new member beyond the cap is refused.
+    is_new_member = member_id not in [m["id"] for m in s["members"]]
+    if is_new_member and len(s["members"]) >= MAX_MEMBERS_PER_ROOM:
+        raise HTTPException(status_code=409, detail="this room is full")
     # Group memory pre-population: a returning member who is NEW to this session
     # and submits NO constraints is auto-filled from their stored prefs, so they
     # only confirm instead of re-entering. A member who submits real constraints
@@ -308,6 +432,7 @@ def add_constraints(sid, person):
         s["fail_reason"] = None
         s["plan"] = None
         s["negotiation"] = None
+    s["last_active_at"] = _now_iso()  # keep the room alive (P1c TTL)
     db.set_session(sid, s)  # write-through AFTER mutation
     # Persist this member's (possibly just-populated) constraints to group memory.
     db.save_member_prefs(member_id, person.get("name"),
@@ -431,6 +556,13 @@ def generate_real_plan(sid):
             status_code=500,
             detail="USE_REAL_SEARCH=true but GOOGLE_PLACES_API_KEY is not set")
 
+    # Public cost guard (P1a): when this room needs a live search and today's Places
+    # cap is hit, don't search — fail honestly as capacity (503), never a fake result.
+    from core import usage
+    if use_real and not usage.places_available():
+        LOGGER.warning("generate_real_plan: Places daily cap hit — refusing search for %s", sid)
+        raise HTTPException(status_code=503, detail=CAPACITY_LIMITED_MESSAGE)
+
     venues, photo_name, est_per_head = venue_search.search_venues(
         location, cuisine, budget_max, dietary, group_size, api_key)
     if not venues:
@@ -516,6 +648,23 @@ def _no_verified_venue(s):
     return s
 
 
+def _capacity_limited(s):
+    """Honest capacity state when the day's Places spend cap is hit in a room that
+    requires a live search. Distinct from `_no_verified_venue`: the truth is "we
+    didn't search", never "no restaurant matched". The UI renders this as a calm
+    "Orkestr is at capacity right now" card — never a fabricated no-results screen.
+    """
+    s["plan"] = None
+    s["handshake"] = None
+    s["negotiation"] = s.get("negotiation") or []
+    s["booking_failed"] = True
+    s["venue_status"] = "capacity_limited"
+    s["plan_ready"] = False
+    s["fail_reason"] = CAPACITY_LIMITED_MESSAGE
+    s["phase"] = "failed"
+    return s
+
+
 def compute_plan(sid, member_ids=None):
     """Negotiation -> plan -> venue handshake. Moves phase to plan_ready.
 
@@ -567,18 +716,31 @@ def _compute_plan_body(sid, member_ids=None):
         # Both fail safe to [] so the planner still runs on the sample venues.
         exa_venues: list = []
         google_venues: list = []
-        try:
-            from agents.discovery import exa_venue_supplements
-            exa_venues = exa_venue_supplements(members, limit=3) or []
-        except Exception:
-            exa_venues = []
-        try:
-            from agents.google_places import search_verified_venues
-            google_venues = search_verified_venues(members, limit=8) or []
-        except Exception:
-            google_venues = []
+        # Public cost guard (P1a): if today's Places spend cap is hit, do NOT search.
+        # Metered at the call site; checked here so we skip the whole paid path.
+        from core import usage
+        places_capped = not usage.places_available()
+        if places_capped:
+            LOGGER.warning("compute_plan: Places daily cap hit — skipping search for %s", sid)
+        if not places_capped:
+            try:
+                from agents.discovery import exa_venue_supplements
+                exa_venues = exa_venue_supplements(members, limit=3) or []
+            except Exception:
+                exa_venues = []
+            try:
+                from agents.google_places import search_verified_venues
+                google_venues = search_verified_venues(members, limit=8) or []
+            except Exception:
+                google_venues = []
 
         strict = is_strict_real_venues()
+        # Cap hit AND this room needs a verified live venue -> honest capacity state,
+        # NEVER a fabricated "no verified restaurant" (that would disguise the cap).
+        if places_capped and strict:
+            _capacity_limited(s)
+            db.set_session(sid, s)  # write-through AFTER mutation (capacity fail)
+            return s
         grounded = google_venues + exa_venues
         # Data-derived budget nudge (additive; real Places data only, never invented):
         # the cheapest CONFIRMED-price verified venue found this search. Stored on the

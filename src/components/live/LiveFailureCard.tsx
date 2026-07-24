@@ -10,6 +10,14 @@ function friendlyReason(
   venueStatus?: string | null,
 ): { subtitle: string; hint: string } {
   const r = (failReason ?? "").toLowerCase();
+  // Capacity FIRST: a spend-cap trip is honest degradation, never "no restaurant".
+  // Its message mentions "venue-search", so it must win over the venue branch below.
+  if (venueStatus === "capacity_limited" || r.includes("at capacity") || r.includes("capacity right now")) {
+    return {
+      subtitle: "Orkestr is at capacity right now — we've hit today's venue-search limit.",
+      hint: "This isn't about your group's constraints. Please try again in a little while.",
+    };
+  }
   // Specific booking/payment failures first (their reasons also mention "venue"
   // or "booking", so they must win over the generic no-verified-venue branch).
   if (r.includes("timed out")) {

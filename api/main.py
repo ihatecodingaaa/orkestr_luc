@@ -10,15 +10,19 @@ Run from the repo root:
 import asyncio
 import hmac
 import json
+import logging
 import os
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from fastapi import Body, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from core import session as S
+
+LOGGER = logging.getLogger("orkestr.api")
 
 
 @asynccontextmanager
@@ -30,6 +34,13 @@ async def _lifespan(app: FastAPI):
     # covers it). seed_demo() no-ops if ORK-001 already exists, so it seeds exactly
     # once. The P0.4 mandate back-cosign lives inside seed_demo() and is unaffected.
     S.seed_demo()
+    # Data lifecycle (P1c): sweep expired rooms on boot, then keep sweeping in the
+    # background (single daemon thread — one worker by design).
+    try:
+        S.cleanup_expired_rooms()
+    except Exception as e:  # noqa: BLE001
+        LOGGER.warning("startup cleanup failed: %s", e)
+    S.start_cleanup_timer()
     yield
 
 
@@ -55,6 +66,10 @@ def _require_session(sid: str) -> dict:
     s = S.get(sid)
     if not s:
         raise HTTPException(status_code=404, detail="session not found")
+    # Expired room (P1c): its PII was scrubbed to a tombstone. Every endpoint returns
+    # an honest 410 so the link shows "This room has expired", never a 500 or stale data.
+    if s.get("expired"):
+        raise HTTPException(status_code=410, detail="This room has expired.")
     return s
 
 
@@ -117,13 +132,46 @@ _RL_BLOCK_SECONDS = int(os.environ.get("ORK_RL_BLOCK_SECONDS", "300"))
 _RL_STATE: dict = {}  # ip -> {"misses": [timestamps], "blocked_until": float}
 
 
+def _client_ip(request: Request) -> str:
+    """The real client IP behind Railway's proxy. X-Forwarded-For is "client, ...,
+    proxyN"; a client can PREPEND fakes but cannot control the entry the trusted
+    proxy appends, so we take the RIGHTMOST hop (the one Railway recorded). Falls
+    back to the direct peer when there is no forwarding header (local/dev)."""
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        parts = [p.strip() for p in xff.split(",") if p.strip()]
+        if parts:
+            return parts[-1]
+    return request.client.host if request.client else "unknown"
+
+
+# Per-IP daily quotas on the EXPENSIVE actions (P1b). These reuse the same client-IP
+# parsing as the enumeration guard above (one limiter, not two) and the same
+# persisted daily-counter store as the spend caps, keyed by (day, "ip:<bucket>:<ip>").
+_IP_ROOM_CREATE_CAP = int(os.environ.get("IP_ROOM_CREATE_DAILY_CAP", "10"))
+_IP_COMPUTE_CAP = int(os.environ.get("IP_COMPUTE_DAILY_CAP", "30"))
+
+
+def _enforce_ip_quota(request: Request, bucket: str, cap: int) -> None:
+    """429 once this IP has used its daily allowance for `bucket`. cap<=0 disables."""
+    if cap <= 0 or os.environ.get("ORK_DISABLE_PUBLIC_LIMITS", "").strip().lower() == "true":
+        return
+    from core import db, usage
+    ip = _client_ip(request)
+    count = db.incr_counter(usage.today(), f"ip:{bucket}:{ip}", 1)
+    if count > cap:
+        raise HTTPException(
+            status_code=429,
+            detail="You've reached today's limit for this action — please try again tomorrow.")
+
+
 def _rl_scoped(path: str) -> bool:
     return path.startswith("/api/") or path.startswith("/receipt/")
 
 
 @app.middleware("http")
 async def _enumeration_guard(request: Request, call_next):
-    ip = request.client.host if request.client else "unknown"
+    ip = _client_ip(request)
     path = request.url.path
     now = time.time()
     entry = _RL_STATE.setdefault(ip, {"misses": [], "blocked_until": 0.0})
@@ -693,7 +741,8 @@ def demo_tamper_check(payload: dict = Body(default=None)):
 
 # ---- Phase 1: before the meal ----
 @app.post("/api/session/start")
-def session_start(payload: dict = Body(default={})):
+def session_start(request: Request, payload: dict = Body(default={})):
+    _enforce_ip_quota(request, "create", _IP_ROOM_CREATE_CAP)
     s = S.new_session(payload.get("name"), payload.get("date_range"))
     invite_url, _ = _invite_and_qr(s["session_id"])  # single helper (P1.4)
     # host_token is returned ONCE, here, to the room creator only.
@@ -743,12 +792,13 @@ def session_invite(sid: str):
 
 
 @app.post("/api/session/live")
-def session_live(payload: dict = Body(default={})):
+def session_live(request: Request, payload: dict = Body(default={})):
     """Fresh, unseeded session with 5 member identities and empty constraints.
 
     The frontend renders one card per member; each member enters constraints
     live and presses find-our-plan. The pipeline runs only once all 5 are ready.
     """
+    _enforce_ip_quota(request, "create", _IP_ROOM_CREATE_CAP)
     s = S.new_live_session(payload.get("name"), payload.get("date_range"))
     invite_url, _ = _invite_and_qr(s["session_id"])  # single helper (P1.4)
     return {
@@ -762,7 +812,7 @@ def session_live(payload: dict = Body(default={})):
 
 
 @app.post("/api/session/clone/{sid}")
-def session_clone(sid: str,
+def session_clone(sid: str, request: Request,
                   x_orkestr_token: str = Header(default=None, alias="X-Orkestr-Token")):
     """Clone a settled session's crew into a fresh session for the next outing.
 
@@ -774,6 +824,7 @@ def session_clone(sid: str,
     """
     src = _require_session(sid)
     _require_host(src, sid, x_orkestr_token)
+    _enforce_ip_quota(request, "create", _IP_ROOM_CREATE_CAP)
     s = S.clone_session(sid)
     invite_url, _ = _invite_and_qr(s["session_id"])
     return {"session_id": s["session_id"], "invite_url": invite_url,
@@ -863,7 +914,7 @@ def status(sid: str):
 
 
 @app.post("/api/session/{sid}/draft")
-def session_draft(sid: str,
+def session_draft(sid: str, request: Request,
                   x_orkestr_token: str = Header(default=None, alias="X-Orkestr-Token")):
     """P2.2 — presenter starts a QUORUM DRAFT once enough friends have replied,
     instead of waiting for everyone. Explicit trigger only (GETs never compute).
@@ -872,6 +923,7 @@ def session_draft(sid: str,
     Runs under the P0 per-session compute lock."""
     s0 = _require_session(sid)
     _require_host(s0, sid, x_orkestr_token)
+    _enforce_ip_quota(request, "compute", _IP_COMPUTE_CAP)  # discretionary compute
     s = S.draft_plan(sid)
     return {"ok": True, "phase": s.get("phase"),
             "plan_basis": s.get("plan_basis"),
@@ -1029,10 +1081,11 @@ def session_public(sid: str,
 # returns it. Refuses ORK-001 (400, frozen); unknown session -> 404; falls back
 # to data/venues.json if the API key is absent/invalid so it never 500s on that.
 @app.post("/api/session/plan/{sid}")
-def session_plan(sid: str,
+def session_plan(sid: str, request: Request,
                  x_orkestr_token: str = Header(default=None, alias="X-Orkestr-Token")):
     s = _require_session(sid)
     _require_host(s, sid, x_orkestr_token)  # presenter-only compute trigger
+    _enforce_ip_quota(request, "compute", _IP_COMPUTE_CAP)  # discretionary compute
     return S.generate_real_plan(sid)
 
 

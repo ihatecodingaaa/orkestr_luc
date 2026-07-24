@@ -208,6 +208,12 @@ def _places_search(text_query, levels, api_key):
             "X-Goog-FieldMask": FIELD_MASK,
         },
     )
+    # Meter the paid outbound call at the call site (retries count too).
+    try:
+        from core import usage
+        usage.record_call(usage.PLACES)
+    except Exception:  # noqa: BLE001
+        pass
     try:
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
             data = json.loads(resp.read())

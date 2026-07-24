@@ -37,6 +37,14 @@ _CONN.execute(
     "CREATE TABLE IF NOT EXISTS member_prefs ("
     "member_id TEXT PRIMARY KEY, name TEXT, constraints TEXT, "
     "freeform TEXT, updated_at TEXT)")
+# Public-readiness (Stage P1): persisted daily counters. One table backs BOTH the
+# paid-API spend guards (keys "api:places", "api:llm") and the per-IP abuse quotas
+# (keys "ip:create:<ip>", "ip:compute:<ip>"). Persisting in SQLite means a process
+# restart never resets a spend counter (money) or hands an abuser a fresh quota.
+_CONN.execute(
+    "CREATE TABLE IF NOT EXISTS daily_counters ("
+    "day TEXT NOT NULL, key TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 0, "
+    "PRIMARY KEY (day, key))")
 _CONN.commit()
 
 
@@ -165,6 +173,45 @@ def get_all_member_prefs():
             "SELECT member_id, name, constraints, freeform, updated_at "
             "FROM member_prefs ORDER BY member_id").fetchall()
     return [_row_to_prefs(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Daily counters — persisted spend + abuse counters (Stage P1). Keyed by (UTC
+# day, key). Stdlib sqlite only; guarded by the same _LOCK as everything else.
+# ---------------------------------------------------------------------------
+
+def incr_counter(day, key, n=1):
+    """Increment (day, key) by n and return the new count. Creates the row on
+    first use. Portable INSERT-OR-IGNORE + UPDATE (no ON CONFLICT dependency)."""
+    with _LOCK:
+        _CONN.execute(
+            "INSERT OR IGNORE INTO daily_counters (day, key, count) VALUES (?, ?, 0)",
+            (day, key))
+        _CONN.execute(
+            "UPDATE daily_counters SET count = count + ? WHERE day = ? AND key = ?",
+            (n, day, key))
+        _CONN.commit()
+        row = _CONN.execute(
+            "SELECT count FROM daily_counters WHERE day = ? AND key = ?",
+            (day, key)).fetchone()
+    return int(row[0]) if row else n
+
+
+def get_counter(day, key):
+    """Current count for (day, key), or 0 if never incremented."""
+    with _LOCK:
+        row = _CONN.execute(
+            "SELECT count FROM daily_counters WHERE day = ? AND key = ?",
+            (day, key)).fetchone()
+    return int(row[0]) if row else 0
+
+
+def counters_for_day(day):
+    """All {key: count} rows for a given UTC day (for the admin status endpoint)."""
+    with _LOCK:
+        rows = _CONN.execute(
+            "SELECT key, count FROM daily_counters WHERE day = ?", (day,)).fetchall()
+    return {r[0]: int(r[1]) for r in rows}
 
 
 def _validate_json_roundtrip():

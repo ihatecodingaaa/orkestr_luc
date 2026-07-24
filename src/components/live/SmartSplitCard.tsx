@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { Avatar } from "./primitives";
-import { fmtMoney, splitSourceLabel } from "@/lib/split";
+import { fmtMoney, splitSourceLabel, isSampleSplit, SAMPLE_ITEMS_LABEL } from "@/lib/split";
 import type { MealSplit, SplitMode } from "@/lib/split";
 import type { SplitSource } from "@/lib/useRoom";
 import s from "./live.module.css";
@@ -35,6 +35,7 @@ export function SmartSplitCard({
   onModeChange,
   source = "local",
   showFallbackNote = false,
+  liveRoom = false,
 }: {
   split: MealSplit;
   mode: SplitMode;
@@ -42,10 +43,20 @@ export function SmartSplitCard({
   source?: SplitSource;
   // Presenter-only, calm note shown when the backend split was tried and failed.
   showFallbackNote?: boolean;
+  // Live rooms never render draft/sample dish names as if real: the itemized tab
+  // is hidden and the Equal split (real, reconciling) is the only view.
+  liveRoom?: boolean;
 }) {
   const [openId, setOpenId] = useState<string | null>(null);
   const toggle = (id: string) => setOpenId((cur) => (cur === id ? null : id));
-  const showToggle = typeof onModeChange === "function";
+  // The item lines are a stand-in menu, not the group's real captured order.
+  const sampleItems = isSampleSplit(split);
+  // In a LIVE room, invented dish names must never appear — suppress every item
+  // name and offer only the Equal split. Demo mode may still showcase itemized,
+  // but only under the persistent "Sample items" label below.
+  const hideItemNames = liveRoom && sampleItems;
+  const allowItemized = !hideItemNames;
+  const showToggle = typeof onModeChange === "function" && allowItemized;
 
   return (
     <div className={s.splitCard}>
@@ -61,6 +72,13 @@ export function SmartSplitCard({
       {showFallbackNote ? (
         <p className={s.splitFallbackNote} role="status">
           Using local demo split. Backend split unavailable.
+        </p>
+      ) : null}
+
+      {sampleItems && !hideItemNames ? (
+        <p className={s.splitSampleBanner} role="note">
+          <span aria-hidden>⚠ </span>
+          {SAMPLE_ITEMS_LABEL}
         </p>
       ) : null}
 
@@ -116,6 +134,11 @@ export function SmartSplitCard({
 
               {open ? (
                 <div className={s.splitDetail}>
+                  {hideItemNames ? (
+                    <p className={s.splitItemEmpty}>
+                      Equal share of the group total — the itemized order wasn&apos;t captured.
+                    </p>
+                  ) : (
                   <ul className={s.splitItems}>
                     {p.items.length === 0 ? (
                       <li className={s.splitItemEmpty}>No items — nothing to reimburse.</li>
@@ -138,6 +161,7 @@ export function SmartSplitCard({
                       ))
                     )}
                   </ul>
+                  )}
                   <div className={s.splitBreakRow}>
                     <span>Service charge</span>
                     <span>{fmtMoney(p.service_charge)}</span>
@@ -160,8 +184,9 @@ export function SmartSplitCard({
       </ul>
 
       <p className={s.splitNote}>
-        Orkestr paid the merchant once through x402. Friends reimburse based on what they
-        ordered — shared dishes split only among the friends who joined them.
+        {hideItemNames
+          ? "Orkestr paid the merchant once through x402. The bill is split equally — cent-exact, so every share sums to the total."
+          : "Orkestr paid the merchant once through x402. Friends reimburse based on what they ordered — shared dishes split only among the friends who joined them."}
       </p>
     </div>
   );

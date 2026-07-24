@@ -681,6 +681,14 @@ def maybe_extract_with_openai(
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     if not api_key:
         return None
+    # Public cost guard (Stage P1a): honor the daily LLM cap and meter the call.
+    try:
+        from core import usage
+        if not usage.llm_available():
+            return None
+        usage.record_call(usage.LLM)
+    except Exception:  # noqa: BLE001
+        pass
     try:
         from openai import OpenAI
 

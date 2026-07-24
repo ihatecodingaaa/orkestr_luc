@@ -285,8 +285,9 @@ export function GroupRoom({
   const [activity, setActivity] = useState<ActivityItem[]>(seedActivity);
   const [busy, setBusy] = useState(false);
   const [autoRunning, setAutoRunning] = useState(false);
-  // Presenter split control — itemized by default (the whole point of Part 2).
-  const [splitMode, setSplitMode] = useState<SplitMode>("itemized");
+  // Presenter split control. Live rooms default to Equal (real, cent-exact,
+  // reconciling); demo rooms may still showcase the itemized split.
+  const [splitMode, setSplitMode] = useState<SplitMode>(isLive ? "equal" : "itemized");
   // Active x402 receipt shown by the proof card / trust panel / wallet lab.
   // Defaults to the saved verified fallback; a deliberate presenter "fresh proof"
   // run swaps in the new on-chain receipt. Reading /latest on mount NEVER spends.
@@ -1181,6 +1182,7 @@ export function GroupRoom({
                     onModeChange={setSplitMode}
                     source={splitSource}
                     showFallbackNote={splitFellBack}
+                    liveRoom={isLive}
                   />
                   {/* Friend legs are tracked state, never on-chain — honest
                       "who pays who back" with Mark-as-paid, no fabricated hashes. */}

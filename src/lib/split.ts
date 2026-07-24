@@ -89,6 +89,21 @@ export function splitSourceLabel(
   }
 }
 
+// The persistent, unmissable label shown on any item list that is NOT the group's
+// real captured order (a session draft, the local demo preview, a fallback). In a
+// live room these stand-in dishes are suppressed entirely; in demo mode they may
+// be shown for the feature showcase, but only under this label.
+export const SAMPLE_ITEMS_LABEL = "Sample items — not this restaurant's menu";
+
+// True when the split's item lines are a stand-in menu rather than the group's real
+// captured order. Only backend_live_orders (recomputed from entered orders) is real;
+// every other source — a session draft, the local demo preview, a fallback, or an
+// unknown/missing source — is a sample that must never be shown as the restaurant's
+// actual food in a live room.
+export function isSampleSplit(split: MealSplit | null | undefined): boolean {
+  return (split?.split_source ?? "") !== "backend_live_orders";
+}
+
 const DEFAULT_CURRENCY = "SGD";
 const DEFAULT_SERVICE_CHARGE_RATE = 0.1;
 const DEFAULT_GST_RATE = 0.09;
