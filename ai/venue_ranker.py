@@ -217,6 +217,12 @@ def _llm_complete(system_prompt: str, user_prompt: str) -> str | None:
     key = os.environ.get("OPENAI_API_KEY", "").strip()
     if not key:
         return None
+    # Meter the paid outbound LLM call at the call site (retries count too).
+    try:
+        from core import usage
+        usage.record_call(usage.LLM)
+    except Exception:  # noqa: BLE001
+        pass
     try:
         client = OpenAI(api_key=key, timeout=8.0)
         resp = client.chat.completions.create(
@@ -341,7 +347,17 @@ def rank_venues(candidates, members, notes="") -> dict:
 
     det = _deterministic_order(reals, members, occasion)
 
-    if is_llm_ranker_enabled():
+    # Public cost guard (Stage P1a): when the day's LLM call budget is spent, skip
+    # the model and use the deterministic ranker. Rooms still resolve and reasons
+    # stay grounded — no fabricated venue, no fabricated metric.
+    _llm_ok = is_llm_ranker_enabled()
+    if _llm_ok:
+        try:
+            from core import usage
+            _llm_ok = usage.llm_available()
+        except Exception:  # noqa: BLE001
+            _llm_ok = True
+    if _llm_ok:
         choice = _llm_choose(reals, members, occasion, notes)
         if choice:
             chosen = _find_by_id(reals, choice["chosen_id"])

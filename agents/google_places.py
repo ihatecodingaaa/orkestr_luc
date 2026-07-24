@@ -284,6 +284,13 @@ def _places_search_text(query: str, api_key: str, limit: int) -> dict:
             "X-Goog-FieldMask": _FIELD_MASK,
         },
     )
+    # Count the paid outbound call at the call site so every attempt (incl. retries)
+    # is metered against the daily Places spend cap. Never blocks or raises here.
+    try:
+        from core import usage
+        usage.record_call(usage.PLACES)
+    except Exception:  # noqa: BLE001
+        pass
     with urllib.request.urlopen(req, timeout=8) as resp:
         return json.loads(resp.read())
 

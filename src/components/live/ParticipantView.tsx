@@ -50,7 +50,10 @@ export function ParticipantView({ roomId, memberId }: { roomId: string; memberId
   // Your share uses the backend split when the live pipeline is on and this room
   // is a real backend session; otherwise the local calculator. No scary warnings
   // on a participant's phone — just the numbers and a subtle source badge.
-  const { split: mySplit, source: splitSource } = useSplit(roomId, "itemized", {
+  // Equal split: real, cent-exact, and reconciling. A live room never shows draft
+  // dish names as if they were the restaurant's actual menu, so we split equally
+  // and label the participant's share honestly.
+  const { split: mySplit, source: splitSource } = useSplit(roomId, "equal", {
     enabled: ENABLE_LIVE_PIPELINE && Boolean(roomId),
   });
 
@@ -388,6 +391,7 @@ export function ParticipantView({ roomId, memberId }: { roomId: string; memberId
                 memberId={memberId}
                 myName={myName}
                 source={splitSource}
+                liveRoom
               />
             </>
           )}

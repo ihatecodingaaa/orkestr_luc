@@ -29,3 +29,13 @@ _SPEND_FLAGS_OFF = {
 
 for _k, _v in _SPEND_FLAGS_OFF.items():
     os.environ[_k] = _v
+
+# Public-readiness per-IP quotas (Stage P1b) are per-day and PERSISTED in
+# sessions.db. The in-process suite shares ONE TestClient IP and one db file across
+# runs, so a real quota would accumulate and 429 unrelated smokes. Disable by
+# default for tests; public_limits_smoke.py sets this to "false" BEFORE importing
+# this guard (setdefault won't override) to exercise the real limits. Production is
+# unaffected — this env var is never set there. The paid-API SPEND caps need no
+# such switch: offline smokes make no real Places/OpenAI calls, so those counters
+# stay at 0 and never trip.
+os.environ.setdefault("ORK_DISABLE_PUBLIC_LIMITS", "true")

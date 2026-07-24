@@ -1,4 +1,4 @@
-import { fmtMoney, splitSourceLabel } from "@/lib/split";
+import { fmtMoney, splitSourceLabel, isSampleSplit, SAMPLE_ITEMS_LABEL } from "@/lib/split";
 import type { MealSplit } from "@/lib/split";
 import type { SplitSource } from "@/lib/useRoom";
 import s from "./live.module.css";
@@ -11,14 +11,21 @@ export function ParticipantSplitCard({
   memberId,
   myName,
   source = "local",
+  liveRoom = false,
 }: {
   split: MealSplit;
   memberId: string;
   myName?: string;
   source?: SplitSource;
+  // In a live room, draft/sample dish names are never shown as if real.
+  liveRoom?: boolean;
 }) {
   const me = split.per_person.find((p) => p.member_id === memberId);
   if (!me) return null;
+
+  const sampleItems = isSampleSplit(split);
+  // Live room + stand-in menu → show the equal share, never invented dishes.
+  const hideItemNames = liveRoom && sampleItems;
 
   return (
     <div className={s.splitCard}>
@@ -33,6 +40,18 @@ export function ParticipantSplitCard({
         <span className={s.splitTotal}>{fmtMoney(split.total)} bill</span>
       </div>
 
+      {sampleItems && !hideItemNames ? (
+        <p className={s.splitSampleBanner} role="note">
+          <span aria-hidden>⚠ </span>
+          {SAMPLE_ITEMS_LABEL}
+        </p>
+      ) : null}
+
+      {hideItemNames ? (
+        <p className={s.splitItemEmpty}>
+          Your equal share of the group bill — cent-exact, sums to the total.
+        </p>
+      ) : (
       <ul className={s.splitItems}>
         {me.items.length === 0 ? (
           <li className={s.splitItemEmpty}>You didn&apos;t order anything — nothing to pay.</li>
@@ -55,6 +74,7 @@ export function ParticipantSplitCard({
           ))
         )}
       </ul>
+      )}
 
       <div className={s.splitBreakRow}>
         <span>Service charge</span>
@@ -89,9 +109,9 @@ export function ParticipantSplitCard({
       </div>
 
       <p className={s.splitNote}>
-        You only pay for your own items and the shared dishes you joined. No wallet, no MetaMask,
-        no crypto — Orkestr&apos;s Agent Wallet paid the merchant once behind the scenes, and you
-        settle your share the way you already do.
+        {hideItemNames
+          ? "Your equal share of the group bill. No wallet, no MetaMask, no crypto — Orkestr's Agent Wallet paid the merchant once behind the scenes, and you settle your share the way you already do."
+          : "You only pay for your own items and the shared dishes you joined. No wallet, no MetaMask, no crypto — Orkestr's Agent Wallet paid the merchant once behind the scenes, and you settle your share the way you already do."}
       </p>
     </div>
   );
