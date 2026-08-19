@@ -1,0 +1,31 @@
+# Line-ending policy for Orkestr.
+#
+# WHY: this repo is developed on Windows, where Git's core.autocrlf setting is
+# per-machine. Without a committed policy, a contributor whose machine lacks
+# core.autocrlf=true reintroduces CRLF into the index and every subsequent diff
+# shows thousands of phantom line changes, burying real review. Pinning the
+# policy in-repo makes it machine-independent.
+#
+# The index is already fully LF, so adding this file changes no stored content.
+
+# Text files: detect automatically, always store LF in the repository.
+* text=auto eol=lf
+
+# Windows-native shells expect CRLF on disk.
+*.ps1  text eol=crlf
+*.cmd  text eol=crlf
+*.bat  text eol=crlf
+
+# Binary assets: never normalise, never diff as text.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.pdf  binary
+*.db   binary
+*.woff  binary
+*.woff2 binary
+
+# Generated lockfile: tracked, but not worth reading in a diff.
+package-lock.json -diff linguist-generated=true
